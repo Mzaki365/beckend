@@ -290,11 +290,10 @@ router.post('/login', authRateLimiter, async (req, res) => {
       path: '/',
     });
 
-    // Return authenticated user profile and token for dual cookie/Bearer resilience
+    // Return authenticated user profile (JWT is stored exclusively in secure HttpOnly cookie)
     return res.json({
       success: true,
       user: safeUser,
-      token,
       message: `Welcome back, ${user.name}!`
     });
   } catch (err) {

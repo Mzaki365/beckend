@@ -50,11 +50,24 @@ router.get('/stores/overview', async (req, res) => {
 
 router.get('/stores', async (req, res) => {
   try {
-    await ensureDefaultStores();
-    const stores = await Store.find({ isActive: true }).sort({ createdAt: -1 });
-    res.json({ success: true, stores });
+    const mongoose = require('mongoose');
+    if (mongoose.connection.readyState === 1) {
+      await ensureDefaultStores();
+      const stores = await Store.find({ isActive: true }).sort({ createdAt: -1 });
+      return res.json({ success: true, stores });
+    }
+    // Resilient fallback to configured store statuses
+    const storeSyncService = require('../services/storeSyncService');
+    const stores = storeSyncService.getAllStoreStatuses();
+    return res.json({ success: true, stores });
   } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
+    try {
+      const storeSyncService = require('../services/storeSyncService');
+      const stores = storeSyncService.getAllStoreStatuses();
+      return res.json({ success: true, stores });
+    } catch (fallbackErr) {
+      return res.status(500).json({ success: false, error: err.message });
+    }
   }
 });
 

@@ -45,7 +45,6 @@ function isOriginAllowed(origin) {
   const clean = origin.replace(/\/$/, '');
   if (allowedOrigins.includes(clean)) return true;
   if (clean.startsWith('http://localhost:') || clean.startsWith('http://127.0.0.1:')) return true;
-  if (clean.endsWith('.vercel.app')) return true;
   return false;
 }
 
@@ -100,6 +99,50 @@ app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
 // Attach io instance to express app so routes can broadcast
 app.set('io', io);
+
+// Database connection & initialization (optimized for Vercel Serverless with cached connection promise)
+let dbPromise = null;
+async function initDatabase() {
+  if (mongoose.connection.readyState === 1) return mongoose.connection;
+  if (dbPromise) return dbPromise;
+
+  const MONGODB_URI = process.env.MONGODB_URI || 'mongodb+srv://sarfrazafzal790_db_user:uf5VWKdvIil4yXUS@storelistener.sy7em7l.mongodb.net/storelistener?retryWrites=true&w=majority&appName=Storelistener';
+
+  dbPromise = mongoose.connect(MONGODB_URI, {
+    serverSelectionTimeoutMS: 5000,
+    connectTimeoutMS: 5000
+  }).then(async (conn) => {
+    console.log('✅ Connected successfully to MongoDB Atlas');
+    try {
+      await authRoutes.seedDefaultUsers();
+      await storeSyncService.ensureStoresInDatabase();
+    } catch (seedErr) {
+      console.warn('Seeding note:', seedErr.message);
+    }
+    return conn;
+  }).catch((err) => {
+    dbPromise = null;
+    console.warn('⚠️ MongoDB Atlas Connection Note:', err.message);
+    console.log('Using resilient local persistence fallback for JWT & user management...');
+    try {
+      authRoutes.seedDefaultUsers();
+    } catch (seedErr) {}
+  });
+
+  return dbPromise;
+}
+
+// Middleware to ensure DB connection is ready before processing API requests
+app.use(async (req, res, next) => {
+  if (mongoose.connection.readyState !== 1) {
+    try {
+      await initDatabase();
+    } catch (e) {
+      // Continue gracefully with local fallback
+    }
+  }
+  next();
+});
 
 // Mount API routes
 app.use('/api/auth', authRoutes.router);
@@ -440,38 +483,7 @@ io.on('connection', (socket) => {
   });
 });
 
-// Database connection & initialization
-let isDbConnecting = false;
-async function initDatabase() {
-  if (isDbConnecting || mongoose.connection.readyState === 1) return;
-  isDbConnecting = true;
-  const MONGODB_URI = process.env.MONGODB_URI || 'mongodb+srv://sarfrazafzal790_db_user:uf5VWKdvIil4yXUS@storelistener.sy7em7l.mongodb.net/storelistener?retryWrites=true&w=majority&appName=Storelistener';
 
-  try {
-    console.log('Connecting to MongoDB Atlas...');
-    await mongoose.connect(MONGODB_URI, { serverSelectionTimeoutMS: 4000 });
-    console.log('✅ Connected successfully to MongoDB Atlas');
-  } catch (err) {
-    console.warn('⚠️ MongoDB Atlas Connection Note:', err.message);
-    console.log('Using resilient local persistence fallback for JWT & user management...');
-  } finally {
-    isDbConnecting = false;
-    try {
-      await authRoutes.seedDefaultUsers();
-      await storeSyncService.ensureStoresInDatabase();
-    } catch (seedErr) {
-      console.warn('Seeding note:', seedErr.message);
-    }
-  }
-}
-
-// Middleware to ensure DB connection is ready for incoming requests
-app.use(async (req, res, next) => {
-  if (mongoose.connection.readyState !== 1 && !isDbConnecting) {
-    await initDatabase();
-  }
-  next();
-});
 
 const PORT = process.env.PORT || 5000;
 
@@ -486,5 +498,5 @@ if (require.main === module) {
   });
 }
 
-module.exports = { app, server, io };
+module.exports = { app, server, io, initDatabase };
 module.exports.default = app;
