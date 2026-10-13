@@ -104,7 +104,8 @@ describe('Storelistener: Move Sales Manager Signup to Electron Desktop App', () 
 
   // 2. The Owner web dashboard no longer exposes Sales Manager signup
   test('2. Web Dashboard Cleanup: Owner web login no longer exposes Sales Manager signup', async () => {
-    const webAuthPath = path.join(__dirname, '..', '..', 'storelistner-frontend', 'src', 'components', 'AuthView.jsx');
+    const frontendDirName = fs.existsSync(path.join(__dirname, '..', '..', 'storelistener-frontend')) ? 'storelistener-frontend' : 'storelistner-frontend';
+    const webAuthPath = path.join(__dirname, '..', '..', frontendDirName, 'src', 'components', 'AuthView.jsx');
     assert.ok(fs.existsSync(webAuthPath), 'Web AuthView.jsx must exist');
 
     const webAuthContent = fs.readFileSync(webAuthPath, 'utf8');

@@ -41,8 +41,9 @@ if (process.env.ALLOWED_ORIGINS) {
 }
 
 function isOriginAllowed(origin) {
-  if (!origin) return true; // Electron, mobile apps, curl, server-to-server
+  if (!origin || origin === 'null') return true; // Electron, mobile apps, curl, server-to-server
   const clean = origin.replace(/\/$/, '');
+  if (clean.startsWith('file://')) return true;
   if (allowedOrigins.includes(clean)) return true;
   if (clean.startsWith('http://localhost:') || clean.startsWith('http://127.0.0.1:')) return true;
   return false;

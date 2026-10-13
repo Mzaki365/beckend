@@ -1,0 +1,29 @@
+services:
+  - type: web
+    name: storelistener-backend
+    runtime: node
+    plan: free
+    region: oregon
+    buildCommand: npm install
+    startCommand: node server.js
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: PORT
+        value: 10000
+      - key: NODE_ENV
+        value: production
+      - key: FRONTEND_URL
+        value: https://storelistener-frontend.vercel.app
+      - key: ALLOWED_ORIGINS
+        value: https://storelistener-frontend.vercel.app,http://localhost:5173,http://localhost:5174
+      - key: MONGODB_URI
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: DEEPGRAM_API_KEY
+        sync: false
+      - key: DEEPGRAM_MODEL
+        value: nova-3
+      - key: JWT_SECRET
+        generateValue: true

@@ -20,11 +20,12 @@ const assert = require('node:assert/strict');
 const jwt = require('jsonwebtoken');
 const mongoose = require('mongoose');
 
+const path = require('path');
 let ioClient;
 try {
   ioClient = require('socket.io-client');
 } catch (e) {
-  ioClient = require('d:/Star Solutions/storelistener/storelistner-desktop/node_modules/socket.io-client');
+  ioClient = require(path.join(__dirname, '..', '..', 'storelistner-desktop', 'node_modules', 'socket.io-client'));
 }
 
 const BACKEND_URL = 'http://localhost:5000';
