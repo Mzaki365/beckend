@@ -4,6 +4,7 @@ const router = express.Router();
 const path = require('path');
 const fs = require('fs');
 const multer = require('multer');
+const mongoose = require('mongoose');
 const Store = require('../models/Store');
 const Session = require('../models/Session');
 const { generateFullAnalysis, analyzeRealtimeChunk } = require('../services/aiService');
@@ -84,16 +85,32 @@ router.post('/stores', async (req, res) => {
 // ---------------- SESSIONS ----------------
 router.get('/sessions', async (req, res) => {
   try {
-    const { storeCode, storeId, status, outcome, limit = 50, page = 1 } = req.query;
+    const {
+      storeCode,
+      storeId,
+      store,
+      status,
+      outcome,
+      date,
+      startDate,
+      endDate,
+      salesperson,
+      sort = 'newest',
+      limit = 50,
+      page = 1,
+    } = req.query;
+
     const query = {};
 
-    if (storeCode || storeId) {
+    const targetStore = store || storeCode || storeId;
+    if (targetStore && targetStore !== 'all') {
       const storeSyncService = require('../services/storeSyncService');
-      const cfg = storeSyncService.findStoreConfig(storeCode || storeId);
+      const cfg = storeSyncService.findStoreConfig(targetStore);
       query.$or = [
         { storeCode: cfg.code },
         { storeCode: cfg.id },
-        { storeCode: (storeCode || storeId) }
+        { storeCode: targetStore },
+        { storeName: new RegExp(targetStore, 'i') },
       ];
     }
 
@@ -102,16 +119,43 @@ router.get('/sessions', async (req, res) => {
     }
 
     if (outcome && outcome !== 'all') {
-      query['analytics.dealOutcome'] = outcome;
+      query.$or = [
+        { 'analytics.dealOutcome': outcome },
+        { 'dealAnalysis.conversationOutcome': outcome },
+      ];
     }
 
+    if (salesperson && salesperson !== 'all') {
+      query.salesRep = new RegExp(salesperson.trim(), 'i');
+    }
+
+    // Calendar-based date filtering (supports YYYY-MM-DD or ISO strings)
+    if (date && date !== 'all') {
+      const match = String(date).match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+      if (match) {
+        const y = parseInt(match[1], 10);
+        const m = parseInt(match[2], 10) - 1;
+        const d = parseInt(match[3], 10);
+        const tzOffsetMin = req.query.tzOffset !== undefined ? parseInt(req.query.tzOffset, 10) : new Date().getTimezoneOffset();
+        const startOfDayMs = Date.UTC(y, m, d, 0, 0, 0, 0) + (tzOffsetMin * 60 * 1000);
+        const endOfDayMs = Date.UTC(y, m, d, 23, 59, 59, 999) + (tzOffsetMin * 60 * 1000);
+        query.startedAt = { $gte: new Date(startOfDayMs), $lte: new Date(endOfDayMs) };
+      }
+    } else if (startDate || endDate) {
+      query.startedAt = {};
+      if (startDate) query.startedAt.$gte = new Date(startDate);
+      if (endDate) query.startedAt.$lte = new Date(endDate);
+    }
+
+    const sortOrder = sort === 'oldest' ? { startedAt: 1 } : { startedAt: -1 };
     const skip = (parseInt(page) - 1) * parseInt(limit);
+
     const [sessions, total] = await Promise.all([
       Session.find(query)
-        .sort({ startedAt: -1 })
+        .sort(sortOrder)
         .skip(skip)
         .limit(parseInt(limit)),
-      Session.countDocuments(query)
+      Session.countDocuments(query),
     ]);
 
     res.json({ success: true, total, sessions });
@@ -122,11 +166,94 @@ router.get('/sessions', async (req, res) => {
 
 router.get('/sessions/:id', async (req, res) => {
   try {
-    const session = await Session.findOne({ sessionId: req.params.id });
+    const isObjectId = mongoose.Types.ObjectId.isValid(req.params.id);
+    const session = await Session.findOne({
+      $or: [{ sessionId: req.params.id }, ...(isObjectId ? [{ _id: req.params.id }] : [])],
+    });
     if (!session) {
       return res.status(404).json({ success: false, error: 'Session not found' });
     }
     res.json({ success: true, session });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// GET /api/sessions/:id/analysis - Return full persisted AI analysis report, or run it if pending
+router.get('/sessions/:id/analysis', async (req, res) => {
+  try {
+    const isObjectId = mongoose.Types.ObjectId.isValid(req.params.id);
+    let session = await Session.findOne({
+      $or: [{ sessionId: req.params.id }, ...(isObjectId ? [{ _id: req.params.id }] : [])],
+    });
+    if (!session) {
+      return res.status(404).json({ success: false, error: 'Session not found' });
+    }
+
+    const hasTranscripts = (session.transcripts?.length || 0) > 0;
+    const isMissingAnalysis = !session.dealAnalysis || session.dealAnalysis.analysisStatus === 'pending' || session.dealAnalysis.analysisStatus === 'failed';
+
+    if (session.status === 'completed' && isMissingAnalysis && hasTranscripts) {
+      const dealAnalysisService = require('../services/dealAnalysisService');
+      const scorecardService = require('../services/scorecardService');
+      try {
+        await dealAnalysisService.runAnalysisForSession(session.sessionId);
+        await scorecardService.evaluateSessionScorecard(session.sessionId);
+        session = await Session.findOne({ sessionId: session.sessionId });
+      } catch (err) {
+        console.warn('Auto-analysis error in /analysis endpoint:', err.message);
+      }
+    }
+
+    res.json({
+      success: true,
+      session,
+      dealAnalysis: session.dealAnalysis || null,
+      scorecard: session.scorecard || null,
+      analytics: session.analytics || null,
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// POST /api/sessions/:id/analyze - Force re-run AI conversation report
+router.post('/sessions/:id/analyze', async (req, res) => {
+  try {
+    const { force = true } = req.body;
+    const isObjectId = mongoose.Types.ObjectId.isValid(req.params.id);
+    let session = await Session.findOne({
+      $or: [{ sessionId: req.params.id }, ...(isObjectId ? [{ _id: req.params.id }] : [])],
+    });
+    if (!session) {
+      return res.status(404).json({ success: false, error: 'Session not found' });
+    }
+
+    const dealAnalysisService = require('../services/dealAnalysisService');
+    const scorecardService = require('../services/scorecardService');
+
+    const [dealAnalysis, scorecard] = await Promise.all([
+      dealAnalysisService.runAnalysisForSession(session.sessionId, { force: Boolean(force) }),
+      scorecardService.evaluateSessionScorecard(session.sessionId, { force: Boolean(force) }),
+    ]);
+
+    const updatedSession = await Session.findOne({ sessionId: session.sessionId });
+
+    const io = req.app.get('io');
+    if (io) {
+      io.emit('deal_analysis_updated', {
+        sessionId: session.sessionId,
+        dealAnalysis,
+        scorecard,
+      });
+    }
+
+    res.json({
+      success: true,
+      session: updatedSession,
+      dealAnalysis,
+      scorecard,
+    });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }

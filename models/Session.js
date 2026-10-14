@@ -147,6 +147,15 @@ const SessionSchema = new mongoose.Schema({
       enum: ['Sale Confirmed', 'Follow-up Required', 'Not Converted', 'Unclear'],
       default: 'Unclear'
     },
+    salesOutcome: {
+      type: String,
+      enum: ['Won', 'Lost', 'Pending', 'Inconclusive'],
+      default: 'Inconclusive'
+    },
+    outcomeExplanation: {
+      type: String,
+      default: ''
+    },
     nextRecommendedAction: {
       type: String,
       default: 'Not mentioned'

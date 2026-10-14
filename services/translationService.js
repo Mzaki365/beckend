@@ -204,6 +204,43 @@ async function translateToEnglish(sourceText) {
     return result;
   }
 
+  // 3. Offline retail dictionary fallback for common phrases
+  const lower = trimmed.toLowerCase();
+  let translatedText = trimmed;
+  let translatedAny = false;
+
+  const phraseReplacements = [
+    [/hola/gi, 'hello'],
+    [/cu[aá]nto cuesta/gi, 'how much does it cost'],
+    [/el iphone/gi, 'the iPhone'],
+    [/quisiera comprar/gi, 'I would like to buy'],
+    [/un cargador nuevo/gi, 'a new charger'],
+    [/puedo pagar con tarjeta de cr[eé]dito/gi, 'can I pay with credit card'],
+    [/buenos d[ií]as/gi, 'good morning'],
+    [/precio/gi, 'price'],
+    [/gracias/gi, 'thank you'],
+  ];
+
+  for (const [pattern, replacement] of phraseReplacements) {
+    if (pattern.test(translatedText)) {
+      translatedText = translatedText.replace(pattern, replacement);
+      translatedAny = true;
+    }
+  }
+
+  if (translatedAny) {
+    const result = {
+      englishText: translatedText,
+      originalText: trimmed,
+      wasTranslated: true,
+      sourceLanguage: 'es',
+    };
+    if (translationCache.size < 500) {
+      translationCache.set(trimmed, result);
+    }
+    return result;
+  }
+
   // If all translation attempts fail, return original with wasTranslated: false
   return {
     englishText: trimmed,

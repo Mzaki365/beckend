@@ -561,6 +561,8 @@ CRITICAL ACCURACY INSTRUCTIONS:
         customerBuyingIntent: 'Unclear',
         salespersonResponse: 'Not mentioned',
         conversationOutcome: 'Unclear',
+        salesOutcome: 'Inconclusive',
+        outcomeExplanation: 'Session contains no usable dialogue transcript content to evaluate outcome.',
         nextRecommendedAction: 'No dialogue recorded; verify terminal microphone status.',
         summary: 'Session contains no usable dialogue transcript content.',
         keyMoments: [],
@@ -614,6 +616,28 @@ CRITICAL ACCURACY INSTRUCTIONS:
         analysisResult = this.analyzeDeterministic(usableLines, metadata);
       }
 
+      const outcome = ['Sale Confirmed', 'Follow-up Required', 'Not Converted', 'Unclear'].includes(analysisResult.conversationOutcome)
+        ? analysisResult.conversationOutcome
+        : 'Unclear';
+
+      const salesOutcome =
+        outcome === 'Sale Confirmed'
+          ? 'Won'
+          : outcome === 'Not Converted'
+          ? 'Lost'
+          : outcome === 'Follow-up Required'
+          ? 'Pending'
+          : 'Inconclusive';
+
+      const outcomeExplanation =
+        outcome === 'Sale Confirmed'
+          ? 'Customer confirmed purchase transaction with payment or explicit agreement to purchase.'
+          : outcome === 'Not Converted'
+          ? 'Customer walked away, rejected the offer, or cited prohibitive budget constraints without purchasing.'
+          : outcome === 'Follow-up Required'
+          ? 'Customer expressed purchase intent but requested time to consult or scheduled a follow-up consultation; transaction pending.'
+          : 'Dialogue ended without explicit transaction or closure statement.';
+
       // Format final subdocument
       const finalAnalysis = {
         customerRequirements: analysisResult.customerRequirements || 'Not mentioned',
@@ -625,9 +649,9 @@ CRITICAL ACCURACY INSTRUCTIONS:
           ? analysisResult.customerBuyingIntent
           : 'Unclear',
         salespersonResponse: analysisResult.salespersonResponse || 'Not mentioned',
-        conversationOutcome: ['Sale Confirmed', 'Follow-up Required', 'Not Converted', 'Unclear'].includes(analysisResult.conversationOutcome)
-          ? analysisResult.conversationOutcome
-          : 'Unclear',
+        conversationOutcome: outcome,
+        salesOutcome,
+        outcomeExplanation,
         nextRecommendedAction: analysisResult.nextRecommendedAction || 'Not mentioned',
         summary: analysisResult.summary || 'Not mentioned',
         keyMoments: Array.isArray(analysisResult.keyMoments) ? analysisResult.keyMoments : [],
