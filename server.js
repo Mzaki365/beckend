@@ -45,9 +45,10 @@ if (process.env.ALLOWED_ORIGINS) {
 
 function isOriginAllowed(origin) {
   if (!origin || origin === 'null') return true; // Electron, mobile apps, curl, server-to-server
-  const clean = origin.replace(/\/$/, '');
-  if (clean.startsWith('file://')) return true;
-  if (allowedOrigins.includes(clean)) return true;
+  if (origin.startsWith('file://') || origin.startsWith('file:')) return true;
+  const clean = origin.replace(/\/+$/, '');
+  if (clean.startsWith('file:')) return true;
+  if (allowedOrigins.includes(clean) || allowedOrigins.includes(origin)) return true;
   if (clean.startsWith('http://localhost:') || clean.startsWith('http://127.0.0.1:')) return true;
   // Allow canonical and preview deployments for storelistener-frontend on Vercel
   if (/^https:\/\/storelistener-frontend.*\.vercel\.app$/.test(clean)) return true;
