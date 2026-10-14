@@ -76,6 +76,7 @@ function createStreamingSession({
     punctuate: 'true',
     interim_results: 'true',
     diarize: 'true',
+    endpointing: 'false',
     utterance_end_ms: '1500',
   });
 
@@ -85,152 +86,199 @@ function createStreamingSession({
   let isConnected = false;
   let isClosing = false;
   let bufferedChunks = [];
+  let keepAliveTimer = null;
+  let reconnectTimer = null;
 
-  try {
-    ws = new WebSocket(deepgramUrl, {
-      headers: {
-        Authorization: `Token ${apiKey.trim()}`,
-      },
-    });
-
-    if (onStatus) {
-      onStatus({
-        status: 'connecting',
-        provider: 'deepgram',
-        model,
-        sessionId,
-      });
-    }
-
-    ws.on('open', () => {
-      isConnected = true;
-      if (onStatus) {
-        onStatus({
-          status: 'connected',
-          provider: 'deepgram',
-          model,
-          sessionId,
-        });
-        onStatus({
-          status: 'active',
-          provider: 'deepgram',
-          model,
-          sessionId,
-        });
-      }
-
-      // Flush any audio chunks received while handshake was establishing
-      while (bufferedChunks.length > 0) {
-        const chunk = bufferedChunks.shift();
-        if (ws.readyState === WebSocket.OPEN) {
-          ws.send(chunk);
+  function startKeepAlive() {
+    stopKeepAlive();
+    keepAliveTimer = setInterval(() => {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        try {
+          ws.send(JSON.stringify({ type: 'KeepAlive' }));
+        } catch (e) {
+          // Non-blocking ping
         }
       }
-    });
+    }, 5000);
+  }
 
-    ws.on('message', async (data) => {
-      try {
-        const message = JSON.parse(data.toString());
-
-        // Handle Deepgram Results payload
-        if (message.type === 'Results' && message.channel) {
-          const alternative = message.channel.alternatives && message.channel.alternatives[0];
-          const transcriptText = alternative?.transcript?.trim();
-
-          if (transcriptText && transcriptText.length > 0) {
-            const isFinal = Boolean(message.is_final || message.speech_final);
-
-            // Determine speaker label from word diarization if present
-            let speakerLabel = null;
-            if (alternative.words && alternative.words.length > 0) {
-              const firstWord = alternative.words[0];
-              if (firstWord && typeof firstWord.speaker === 'number') {
-                speakerLabel = `Speaker ${firstWord.speaker}`;
-              }
-            }
-
-            const startTime = typeof message.start === 'number' ? message.start : null;
-            const duration = typeof message.duration === 'number' ? message.duration : null;
-            const endTime = startTime !== null && duration !== null ? Number((startTime + duration).toFixed(2)) : null;
-
-            // Perform English translation pipeline for multilingual speech (Spanish, etc.)
-            let englishText = transcriptText;
-            let originalText = transcriptText;
-            let wasTranslated = false;
-            let sourceLanguage = 'en';
-
-            try {
-              const translationResult = await translateToEnglish(transcriptText);
-              if (translationResult) {
-                englishText = translationResult.englishText || transcriptText;
-                originalText = translationResult.originalText || transcriptText;
-                wasTranslated = translationResult.wasTranslated || false;
-                sourceLanguage = translationResult.sourceLanguage || 'en';
-              }
-            } catch (transErr) {
-              console.warn(`[STT Translation] Note for session ${sessionId}:`, transErr.message);
-            }
-
-            const segment = {
-              segmentId: `seg_${sessionId}_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
-              sessionId,
-              speaker: speakerLabel || 'Speaker',
-              text: englishText,
-              originalText: wasTranslated ? originalText : undefined,
-              isTranslated: wasTranslated,
-              sourceLanguage,
-              targetLanguage: 'en',
-              confidence: alternative.confidence || 0.95,
-              startTime,
-              endTime,
-              isFinal,
-              receivedAt: new Date().toISOString(),
-            };
-
-            if (onSegment) {
-              onSegment(segment);
-            }
-          }
-        }
-      } catch (err) {
-        console.warn(`[Deepgram] Parse note for session ${sessionId}:`, err.message);
-      }
-    });
-
-    ws.on('error', (err) => {
-      console.error(`[Deepgram STT] WebSocket Error for session ${sessionId}:`, err.message);
-      if (onError) {
-        onError({
-          error: `Speech-to-text connection error: ${err.message}`,
-          sessionId,
-        });
-      }
-    });
-
-    ws.on('close', (code, reason) => {
-      isConnected = false;
-      const reasonStr = reason ? reason.toString() : '';
-      if (onClose) {
-        onClose({
-          code,
-          reason: reasonStr,
-          sessionId,
-        });
-      }
-    });
-  } catch (initErr) {
-    console.error(`[Deepgram STT] Failed to initialize session ${sessionId}:`, initErr);
-    if (onError) {
-      onError({ error: initErr.message, sessionId });
+  function stopKeepAlive() {
+    if (keepAliveTimer) {
+      clearInterval(keepAliveTimer);
+      keepAliveTimer = null;
     }
   }
+
+  function connectWebSocket() {
+    if (isClosing) return;
+
+    try {
+      ws = new WebSocket(deepgramUrl, {
+        headers: {
+          Authorization: `Token ${apiKey.trim()}`,
+        },
+      });
+
+      if (onStatus) {
+        onStatus({
+          status: 'connecting',
+          provider: 'deepgram',
+          model,
+          sessionId,
+        });
+      }
+
+      ws.on('open', () => {
+        isConnected = true;
+        startKeepAlive();
+
+        if (onStatus) {
+          onStatus({
+            status: 'connected',
+            provider: 'deepgram',
+            model,
+            sessionId,
+          });
+          onStatus({
+            status: 'active',
+            provider: 'deepgram',
+            model,
+            sessionId,
+          });
+        }
+
+        // Flush any audio chunks received while handshake was establishing
+        while (bufferedChunks.length > 0) {
+          const chunk = bufferedChunks.shift();
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(chunk);
+          }
+        }
+      });
+
+      ws.on('message', async (data) => {
+        try {
+          const message = JSON.parse(data.toString());
+
+          // Handle Deepgram Results payload
+          if (message.type === 'Results' && message.channel) {
+            const alternative = message.channel.alternatives && message.channel.alternatives[0];
+            const transcriptText = alternative?.transcript?.trim();
+
+            if (transcriptText && transcriptText.length > 0) {
+              const isFinal = Boolean(message.is_final || message.speech_final);
+
+              // Determine speaker label from word diarization if present
+              let speakerLabel = null;
+              if (alternative.words && alternative.words.length > 0) {
+                const firstWord = alternative.words[0];
+                if (firstWord && typeof firstWord.speaker === 'number') {
+                  speakerLabel = `Speaker ${firstWord.speaker}`;
+                }
+              }
+
+              const startTime = typeof message.start === 'number' ? message.start : null;
+              const duration = typeof message.duration === 'number' ? message.duration : null;
+              const endTime = startTime !== null && duration !== null ? Number((startTime + duration).toFixed(2)) : null;
+
+              // Perform English translation pipeline for multilingual speech (Spanish, etc.)
+              let englishText = transcriptText;
+              let originalText = transcriptText;
+              let wasTranslated = false;
+              let sourceLanguage = 'en';
+
+              try {
+                const translationResult = await translateToEnglish(transcriptText);
+                if (translationResult) {
+                  englishText = translationResult.englishText || transcriptText;
+                  originalText = translationResult.originalText || transcriptText;
+                  wasTranslated = translationResult.wasTranslated || false;
+                  sourceLanguage = translationResult.sourceLanguage || 'en';
+                }
+              } catch (transErr) {
+                console.warn(`[STT Translation] Note for session ${sessionId}:`, transErr.message);
+              }
+
+              const segment = {
+                segmentId: `seg_${sessionId}_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+                sessionId,
+                speaker: speakerLabel || 'Speaker',
+                text: englishText,
+                originalText: wasTranslated ? originalText : undefined,
+                isTranslated: wasTranslated,
+                sourceLanguage,
+                targetLanguage: 'en',
+                confidence: alternative.confidence || 0.95,
+                startTime,
+                endTime,
+                isFinal,
+                receivedAt: new Date().toISOString(),
+              };
+
+              if (onSegment) {
+                onSegment(segment);
+              }
+            }
+          }
+        } catch (err) {
+          console.warn(`[Deepgram] Parse note for session ${sessionId}:`, err.message);
+        }
+      });
+
+      ws.on('error', (err) => {
+        console.error(`[Deepgram STT] WebSocket Error for session ${sessionId}:`, err.message);
+        if (onError && isClosing) {
+          onError({
+            error: `Speech-to-text connection error: ${err.message}`,
+            sessionId,
+          });
+        }
+      });
+
+      ws.on('close', (code, reason) => {
+        isConnected = false;
+        stopKeepAlive();
+        const reasonStr = reason ? reason.toString() : '';
+
+        // If closed while session is still active, automatically reconnect without dropping conversation
+        if (!isClosing) {
+          console.log(`🔄 [Deepgram STT] Stream segment closed (${reasonStr || code}). Reconnecting stream for session ${sessionId}...`);
+          if (reconnectTimer) clearTimeout(reconnectTimer);
+          reconnectTimer = setTimeout(() => {
+            if (!isClosing) {
+              connectWebSocket();
+            }
+          }, 600);
+        } else {
+          if (onClose) {
+            onClose({
+              code,
+              reason: reasonStr,
+              sessionId,
+            });
+          }
+        }
+      });
+    } catch (initErr) {
+      console.error(`[Deepgram STT] Failed to initialize session ${sessionId}:`, initErr);
+      if (onError) {
+        onError({ error: initErr.message, sessionId });
+      }
+    }
+  }
+
+  connectWebSocket();
 
   return {
     isConfigured: true,
     sendAudioChunk: (chunk) => {
       if (isClosing || !chunk) return;
       if (isConnected && ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(chunk);
+        try {
+          ws.send(chunk);
+        } catch (e) {
+          if (bufferedChunks.length < 50) bufferedChunks.push(chunk);
+        }
       } else if (bufferedChunks.length < 50) {
         // Buffer up to 50 slices during connection handshakes
         bufferedChunks.push(chunk);
@@ -238,6 +286,11 @@ function createStreamingSession({
     },
     finish: () => {
       isClosing = true;
+      stopKeepAlive();
+      if (reconnectTimer) {
+        clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+      }
       if (ws && ws.readyState === WebSocket.OPEN) {
         try {
           // Deepgram official close stream protocol message

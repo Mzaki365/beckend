@@ -56,6 +56,8 @@ class StoreSyncService {
     this.authenticatedSockets = new Map();
     // Active session transcript buffers: sessionId -> array of segments
     this.activeTranscripts = new Map();
+    // Session to store mapping: sessionId -> store config
+    this.sessionToStore = new Map();
 
     this.heartbeatTimer = null;
     this.staleThresholdMs = 15000; // 15 seconds stale threshold
@@ -286,6 +288,9 @@ class StoreSyncService {
       this.socketToStore.set(socket.id, cfg.id);
     }
 
+    // Map session ID to store config
+    this.sessionToStore.set(sessionId, cfg);
+
     // Initialize transcript segment buffer
     this.activeTranscripts.set(sessionId, []);
 
@@ -351,6 +356,7 @@ class StoreSyncService {
     const { sessionId, text, speaker = 'Customer', isFinal = false, timestamp, segmentId, sourceLanguage, isTranslated } = payload;
     if (!sessionId || !text || !text.trim()) return;
 
+    const cfg = this.sessionToStore.get(sessionId) || this.findStoreConfig(this.getSessionStoreCode(sessionId) || payload.storeId || payload.storeCode);
     const buffer = this.activeTranscripts.get(sessionId) || [];
     const item = {
       segmentId: segmentId || `seg_${Date.now()}_${Math.random().toString(36).substr(2, 4)}`,
@@ -386,21 +392,21 @@ class StoreSyncService {
       }
     }
 
+    const broadcastChunk = {
+      sessionId,
+      storeId: cfg.id,
+      storeCode: cfg.code,
+      storeName: cfg.name,
+      ...item,
+    };
+
     // Broadcast to authorized listeners of this session
-    io.to(`session_${sessionId}`).emit('transcript_stream_chunk', {
-      sessionId,
-      ...item,
-    });
+    io.to(`session_${sessionId}`).emit('transcript_stream_chunk', broadcastChunk);
+    io.to(`store_${cfg.code}`).emit('transcript_stream_chunk', broadcastChunk);
     // Broadcast to dashboard overview and live monitoring
-    io.emit('transcript_stream_chunk', {
-      sessionId,
-      ...item,
-    });
+    io.emit('transcript_stream_chunk', broadcastChunk);
     // Broadcast to global live monitoring wall
-    io.emit('live_monitor_event', {
-      sessionId,
-      ...item,
-    });
+    io.emit('live_monitor_event', broadcastChunk);
   }
 
   /**
@@ -410,7 +416,7 @@ class StoreSyncService {
     const { sessionId, storeId, storeCode, durationSeconds, endedAt, transcripts } = payload;
     if (!sessionId) return;
 
-    const cfg = this.findStoreConfig(storeId || storeCode);
+    const cfg = this.sessionToStore.get(sessionId) || this.findStoreConfig(storeId || storeCode);
     const storeState = this.storeStates.get(cfg.id);
 
     if (storeState) {
@@ -454,6 +460,7 @@ class StoreSyncService {
       sessionId,
       storeId: cfg.id,
       storeCode: cfg.code,
+      storeName: cfg.name,
       status: 'completed',
       endedAt: endTime.toISOString(),
       durationSeconds: durationSeconds || 0,
@@ -461,6 +468,7 @@ class StoreSyncService {
 
     io.emit('session_ended', endPayload);
     io.to(`session_${sessionId}`).emit('session_closed', endPayload);
+    io.to(`store_${cfg.code}`).emit('session_ended', endPayload);
     this.broadcastStoreStatus(io, cfg.id);
 
     try {
