@@ -18,6 +18,9 @@ const { JWT_SECRET } = require('./middleware/auth');
 const activeSTTSessions = new Map();
 
 const app = express();
+// Enable trust proxy for Render reverse-proxy HTTPS protocol and cookie header forwarding
+app.set('trust proxy', 1);
+
 const server = http.createServer(app);
 
 // Allowed frontend origins for credentialed requests
@@ -46,21 +49,25 @@ function isOriginAllowed(origin) {
   if (clean.startsWith('file://')) return true;
   if (allowedOrigins.includes(clean)) return true;
   if (clean.startsWith('http://localhost:') || clean.startsWith('http://127.0.0.1:')) return true;
+  // Allow canonical and preview deployments for storelistener-frontend on Vercel
+  if (/^https:\/\/storelistener-frontend.*\.vercel\.app$/.test(clean)) return true;
   return false;
 }
 
-// Enable Socket.IO with CORS
+// Enable Socket.IO with CORS mounted at standard /socket.io/
 const io = new Server(server, {
+  path: '/socket.io/',
   cors: {
     origin: (origin, callback) => {
       if (isOriginAllowed(origin)) {
         return callback(null, true);
       }
-      return callback(null, true);
+      return callback(new Error(`Not allowed by CORS: ${origin}`));
     },
     credentials: true,
     methods: ['GET', 'POST']
-  }
+  },
+  transports: ['websocket', 'polling']
 });
 
 // Middleware: Credentialed CORS
