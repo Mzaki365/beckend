@@ -477,6 +477,27 @@ class StoreSyncService {
         updateData.durationSeconds = durationSeconds;
       }
 
+      // If audioBase64 or base64Data is supplied in session_stop, persist audio file immediately
+      if (payload.audioBase64 || payload.base64Data) {
+        try {
+          const fs = require('fs');
+          const path = require('path');
+          const uploadsDir = path.join(__dirname, '..', 'uploads');
+          if (!fs.existsSync(uploadsDir)) {
+            fs.mkdirSync(uploadsDir, { recursive: true });
+          }
+          const base64Data = payload.audioBase64 || payload.base64Data;
+          const fileName = `session-${sessionId}-${Date.now()}.webm`;
+          const filePath = path.join(uploadsDir, fileName);
+          fs.writeFileSync(filePath, Buffer.from(base64Data, 'base64'));
+          updateData.audioFileName = fileName;
+          updateData.audioUrl = `/uploads/${fileName}`;
+          console.log(`🎙️ [Session Sync] Audio saved and linked for session: ${sessionId} (${fileName})`);
+        } catch (audioErr) {
+          console.warn('[Session Sync] Audio save error:', audioErr.message);
+        }
+      }
+
       if (Array.isArray(bufferedSegments) && bufferedSegments.length > 0) {
         updateData.transcripts = bufferedSegments.map((s) => ({
           timestamp: s.timestamp ? new Date(s.timestamp) : new Date(),

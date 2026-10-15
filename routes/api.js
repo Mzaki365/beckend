@@ -375,23 +375,106 @@ router.post('/sessions/:id/end', async (req, res) => {
   }
 });
 
-// Upload audio recording file
-router.post('/sessions/:id/audio', upload.single('audio'), async (req, res) => {
+// Upload audio recording file (supports multipart file upload OR base64 JSON)
+router.post('/sessions/:id/audio', (req, res, next) => {
+  if (req.is('application/json')) {
+    return next();
+  }
+  upload.single('audio')(req, res, next);
+}, async (req, res) => {
   try {
-    if (!req.file) {
-      return res.status(400).json({ success: false, error: 'No audio file uploaded' });
+    const sessionId = req.params.id;
+    let fileName = null;
+
+    if (req.file) {
+      fileName = req.file.filename;
+    } else if (req.body && (req.body.base64Data || req.body.audioBase64)) {
+      const base64Data = req.body.base64Data || req.body.audioBase64;
+      const mimeType = req.body.mimeType || 'audio/webm';
+      let ext = '.webm';
+      if (mimeType.includes('ogg')) ext = '.ogg';
+      if (mimeType.includes('wav')) ext = '.wav';
+      if (mimeType.includes('mp4') || mimeType.includes('m4a')) ext = '.mp4';
+
+      fileName = `session-${sessionId}-${Date.now()}${ext}`;
+      const filePath = path.join(uploadsDir, fileName);
+      const buffer = Buffer.from(base64Data, 'base64');
+      fs.writeFileSync(filePath, buffer);
+    } else {
+      return res.status(400).json({ success: false, error: 'No audio file or base64Data provided' });
     }
-    const session = await Session.findOne({ sessionId: req.params.id });
+
+    const session = await Session.findOne({ sessionId });
     if (session) {
-      session.audioFileName = req.file.filename;
-      session.audioUrl = `/uploads/${req.file.filename}`;
+      session.audioFileName = fileName;
+      session.audioUrl = `/uploads/${fileName}`;
       await session.save();
     }
-    res.json({ success: true, audioUrl: `/uploads/${req.file.filename}` });
+
+    res.json({ success: true, audioUrl: `/uploads/${fileName}`, fileName });
+  } catch (err) {
+    console.error('[Audio Upload Error]', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// Stream audio recording for playback with HTTP 206 Partial Content (range requests)
+router.get('/sessions/:id/audio', async (req, res) => {
+  try {
+    const session = await Session.findOne({ sessionId: req.params.id });
+    if (!session) {
+      return res.status(404).json({ success: false, error: 'Session not found' });
+    }
+
+    const fileName = session.audioFileName || (session.audioUrl ? path.basename(session.audioUrl) : null);
+    if (!fileName) {
+      return res.status(404).json({ success: false, error: 'Recording unavailable for this conversation' });
+    }
+
+    const filePath = path.join(uploadsDir, fileName);
+    if (!fs.existsSync(filePath)) {
+      return res.status(404).json({ success: false, error: 'Recording file not found on disk' });
+    }
+
+    const stat = fs.statSync(filePath);
+    const fileSize = stat.size;
+    const range = req.headers.range;
+
+    const ext = path.extname(fileName).toLowerCase();
+    let mimeType = 'audio/webm';
+    if (ext === '.wav') mimeType = 'audio/wav';
+    if (ext === '.ogg') mimeType = 'audio/ogg';
+    if (ext === '.mp3') mimeType = 'audio/mpeg';
+    if (ext === '.mp4' || ext === '.m4a') mimeType = 'audio/mp4';
+
+    if (range) {
+      const parts = range.replace(/bytes=/, '').split('-');
+      const start = parseInt(parts[0], 10);
+      const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
+      const chunksize = end - start + 1;
+      const file = fs.createReadStream(filePath, { start, end });
+      const head = {
+        'Content-Range': `bytes ${start}-${end}/${fileSize}`,
+        'Accept-Ranges': 'bytes',
+        'Content-Length': chunksize,
+        'Content-Type': mimeType,
+      };
+      res.writeHead(206, head);
+      file.pipe(res);
+    } else {
+      const head = {
+        'Content-Length': fileSize,
+        'Content-Type': mimeType,
+        'Accept-Ranges': 'bytes',
+      };
+      res.writeHead(200, head);
+      fs.createReadStream(filePath).pipe(res);
+    }
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
 });
+
 
 // Real-time Cloud Speech-to-Text Transcription for Urdu, Punjabi & English audio chunk
 router.post('/sessions/:id/live-transcribe', uploadMemory.single('audioChunk'), async (req, res) => {

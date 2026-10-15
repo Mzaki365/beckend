@@ -551,7 +551,8 @@ Rules:
         analysisStatus: aStatus,
         limitations: 'Single-channel counter audio. Diarization speaker roles estimated from retail conversation cues.',
         // 14. Audio playback, sentiment, word count & coaching note
-        audioUrl: s.audioUrl || (s.audioFileName ? `/uploads/${s.audioFileName}` : null),
+        hasAudio: Boolean(s.audioUrl || s.audioFileName),
+        audioUrl: s.audioUrl || (s.audioFileName ? `/uploads/${s.audioFileName}` : `/api/sessions/${s.sessionId}/audio`),
         audioFileName: s.audioFileName || null,
         sentiment: (s.scorecard?.sentiment || da.sentiment || (salesOutcome === 'Won' ? 'POSITIVE' : salesOutcome === 'Lost' ? 'NEGATIVE' : 'NEUTRAL')).toUpperCase(),
         wordCount: englishTranscripts.reduce((acc, t) => acc + (t.text || '').trim().split(/\s+/).filter(Boolean).length, 0),
