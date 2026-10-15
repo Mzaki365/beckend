@@ -550,11 +550,26 @@ Rules:
         // 13. Analysis status and limitations
         analysisStatus: aStatus,
         limitations: 'Single-channel counter audio. Diarization speaker roles estimated from retail conversation cues.',
+        // 14. Audio playback, sentiment, word count & coaching note
+        audioUrl: s.audioUrl || (s.audioFileName ? `/uploads/${s.audioFileName}` : null),
+        audioFileName: s.audioFileName || null,
+        sentiment: (s.scorecard?.sentiment || da.sentiment || (salesOutcome === 'Won' ? 'POSITIVE' : salesOutcome === 'Lost' ? 'NEGATIVE' : 'NEUTRAL')).toUpperCase(),
+        wordCount: englishTranscripts.reduce((acc, t) => acc + (t.text || '').trim().split(/\s+/).filter(Boolean).length, 0),
+        coachingNote: sc.coachingFeedback?.actionableCoaching || (englishTranscripts.length === 0 ? 'No speech detected during this interaction. Check audio sensor functionality and ensure staff are actively engaging people on the floor.' : (da.nextRecommendedAction && da.nextRecommendedAction !== 'Not mentioned' ? da.nextRecommendedAction : 'Greet shoppers warmly, actively discover preference, and highlight trade-in incentives.')),
+        score: sc.overallScore != null ? sc.overallScore : (salesOutcome === 'Won' ? 4 : salesOutcome === 'Pending' ? 3 : salesOutcome === 'Lost' ? 2 : 3),
       };
     });
 
     const conversionRate = totalCompleted > 0 ? Math.round((wonCount / totalCompleted) * 100) : 0;
     const followUpRate = totalCompleted > 0 ? Math.round((pendingCount / totalCompleted) * 100) : 0;
+    const avgTicket = verifiedSalesCount > 0 && verifiedRevenueTotal > 0 ? Math.round(verifiedRevenueTotal / verifiedSalesCount) : null;
+    const activityLevel = (totalCompleted >= 6 || verifiedSalesCount >= 2) ? 'Active' : (totalCompleted >= 2 || verifiedSalesCount >= 1) ? 'Moderate' : 'Quiet';
+    const headline = hasVerifiedRevenue
+      ? `${activityLevel} day, $${verifiedRevenueTotal} in sales, ${totalCompleted} conversation${totalCompleted === 1 ? '' : 's'}`
+      : `${activityLevel} day — no sales, ${totalCompleted} conversation${totalCompleted === 1 ? '' : 's'}`;
+    const headlineExplanation = totalCompleted === 0
+      ? 'Quiet day — no conversations recorded and no verified sales.'
+      : `${activityLevel} day with ${totalCompleted} recorded customer consultation${totalCompleted > 1 ? 's' : ''} across store counters. ${verifiedSalesCount > 0 ? `Confirmed ${verifiedSalesCount} verified sales transaction${verifiedSalesCount > 1 ? 's' : ''} generating $${verifiedRevenueTotal}.` : 'No confirmed customer transactions recorded for this business date.'}`;
 
     const metrics = {
       totalCompleted,
@@ -567,7 +582,16 @@ Rules:
       inconclusiveCount,
       verifiedSalesCount,
       verifiedRevenue: hasVerifiedRevenue ? verifiedRevenueTotal : null,
-      verifiedRevenueDisplay: hasVerifiedRevenue ? `$${verifiedRevenueTotal.toLocaleString()}` : 'Unavailable (Not verified)',
+      verifiedRevenueDisplay: hasVerifiedRevenue ? `$${verifiedRevenueTotal.toLocaleString()}` : '$0',
+      avgTicket,
+      avgTicketDisplay: avgTicket != null ? `$${avgTicket}` : 'N/A',
+      missedRevenue: lostCount > 0 ? lostCount * 25 : 0,
+      missedRevenueDisplay: lostCount > 0 ? `$${lostCount * 25}` : '$0',
+      lowStockCount: 0,
+      lowStockDisplay: '0',
+      activityLevel,
+      headline,
+      headlineExplanation,
       insufficientEvidenceCount,
       conversionRate,
       followUpRate,

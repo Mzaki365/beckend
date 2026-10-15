@@ -683,6 +683,18 @@ router.get('/reports/daily', async (req, res) => {
   }
 });
 
+router.post('/reports/daily/analyze', async (req, res) => {
+  try {
+    const dailyReportService = require('../services/dailyReportService');
+    const user = extractUserFromRequest(req);
+    const report = await dailyReportService.getDailyReport({ ...req.body, ...req.query, refresh: true }, user);
+    res.json({ success: true, report, ...report });
+  } catch (err) {
+    console.error('Daily report analyze error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 router.get('/reports/daily/pdf', async (req, res) => {
   try {
     const dailyReportService = require('../services/dailyReportService');
