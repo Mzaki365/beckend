@@ -356,39 +356,75 @@ class StoreSyncService {
     const { sessionId, text, speaker = 'Customer', isFinal = false, timestamp, segmentId, sourceLanguage, isTranslated } = payload;
     if (!sessionId || !text || !text.trim()) return;
 
+    // Ensure translation to canonical English text if incoming segment is not yet translated
+    let englishText = text.trim();
+    let originalText = payload.originalText || text.trim();
+    let wasTranslated = !!payload.isTranslated;
+    let detectedSourceLang = payload.sourceLanguage || 'en';
+
+    if (!wasTranslated) {
+      try {
+        const { translateToEnglish } = require('./translationService');
+        const translationResult = await translateToEnglish(text);
+        if (translationResult && translationResult.wasTranslated) {
+          englishText = translationResult.englishText;
+          originalText = translationResult.originalText || text.trim();
+          wasTranslated = true;
+          detectedSourceLang = translationResult.sourceLanguage || 'es';
+        }
+      } catch (trErr) {
+        console.warn(`[Session Sync] Translation note for ${sessionId}:`, trErr.message);
+      }
+    }
+
     const cfg = this.sessionToStore.get(sessionId) || this.findStoreConfig(this.getSessionStoreCode(sessionId) || payload.storeId || payload.storeCode);
     const buffer = this.activeTranscripts.get(sessionId) || [];
     const item = {
       segmentId: segmentId || `seg_${Date.now()}_${Math.random().toString(36).substr(2, 4)}`,
       timestamp: timestamp ? new Date(timestamp) : new Date(),
       speaker: speaker || 'Customer',
-      text: text.trim(),
+      text: englishText,
+      englishText: englishText,
+      originalText: originalText,
       isFinal: !!isFinal,
-      sourceLanguage: sourceLanguage || 'en',
-      isTranslated: !!isTranslated,
+      sourceLanguage: detectedSourceLang,
+      isTranslated: wasTranslated,
     };
 
     if (isFinal) {
-      buffer.push(item);
-      this.activeTranscripts.set(sessionId, buffer);
+      // Deduplication guard: ignore repeated segments with identical segmentId or identical text within 2 seconds
+      const isDuplicate = buffer.some(
+        (b) => b.segmentId === item.segmentId ||
+          (b.text.toLowerCase() === item.text.toLowerCase() &&
+           Math.abs(new Date(b.timestamp).getTime() - new Date(item.timestamp).getTime()) < 2000)
+      );
 
-      // Persist finalized segment to MongoDB Session
-      try {
-        await Session.updateOne(
-          { sessionId },
-          {
-            $push: {
-              transcripts: {
-                timestamp: item.timestamp,
-                speaker: item.speaker.toLowerCase().includes('sales') ? 'sales_rep' : 'customer',
-                text: item.text,
-                confidence: 0.95,
+      if (!isDuplicate) {
+        buffer.push(item);
+        this.activeTranscripts.set(sessionId, buffer);
+
+        // Persist finalized canonical English segment to MongoDB Session
+        try {
+          await Session.updateOne(
+            { sessionId },
+            {
+              $push: {
+                transcripts: {
+                  timestamp: item.timestamp,
+                  speaker: item.speaker.toLowerCase().includes('sales') ? 'sales_rep' : 'customer',
+                  text: item.text,
+                  englishText: item.englishText,
+                  originalText: item.originalText,
+                  sourceLanguage: item.sourceLanguage,
+                  isTranslated: item.isTranslated,
+                  confidence: 0.95,
+                },
               },
-            },
-          }
-        );
-      } catch (err) {
-        console.warn('[Session Sync] Transcript persistence note:', err.message);
+            }
+          );
+        } catch (err) {
+          console.warn('[Session Sync] Transcript persistence note:', err.message);
+        }
       }
     }
 
@@ -400,7 +436,7 @@ class StoreSyncService {
       ...item,
     };
 
-    // Broadcast to authorized listeners of this session
+    // Broadcast canonical English chunk to authorized listeners of this session
     io.to(`session_${sessionId}`).emit('transcript_stream_chunk', broadcastChunk);
     io.to(`store_${cfg.code}`).emit('transcript_stream_chunk', broadcastChunk);
     // Broadcast to dashboard overview and live monitoring
@@ -443,7 +479,11 @@ class StoreSyncService {
         updateData.transcripts = bufferedSegments.map((s) => ({
           timestamp: s.timestamp ? new Date(s.timestamp) : new Date(),
           speaker: (s.speaker || '').toLowerCase().includes('sales') ? 'sales_rep' : 'customer',
-          text: s.text || '',
+          text: s.text || s.englishText || '',
+          englishText: s.englishText || s.text || '',
+          originalText: s.originalText || s.text || '',
+          sourceLanguage: s.sourceLanguage || 'en',
+          isTranslated: !!s.isTranslated,
           confidence: s.confidence || 0.95,
         }));
       }

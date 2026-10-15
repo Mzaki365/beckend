@@ -14,6 +14,22 @@ const TranscriptItemSchema = new mongoose.Schema({
     type: String,
     required: true
   },
+  englishText: {
+    type: String,
+    default: null
+  },
+  originalText: {
+    type: String,
+    default: null
+  },
+  sourceLanguage: {
+    type: String,
+    default: 'en'
+  },
+  isTranslated: {
+    type: Boolean,
+    default: false
+  },
   confidence: {
     type: Number,
     default: 0.95
@@ -69,6 +85,18 @@ const SessionSchema = new mongoose.Schema({
     default: null
   },
   audioFileName: {
+    type: String,
+    default: null
+  },
+  verifiedSale: {
+    type: Boolean,
+    default: false
+  },
+  verifiedRevenue: {
+    type: Number,
+    default: null
+  },
+  transactionId: {
     type: String,
     default: null
   },
@@ -151,6 +179,10 @@ const SessionSchema = new mongoose.Schema({
       type: String,
       enum: ['Won', 'Lost', 'Pending', 'Inconclusive'],
       default: 'Inconclusive'
+    },
+    isSaleVerified: {
+      type: Boolean,
+      default: false
     },
     outcomeExplanation: {
       type: String,

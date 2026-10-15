@@ -14,14 +14,25 @@
 require('dotenv').config();
 const translationCache = new Map();
 
-// Common Spanish markers & vocabulary for fast classification
-const SPANISH_INDICATORS = new Set([
-  'hola', 'buenos', 'buenas', 'dias', 'tardes', 'noches', 'gracias', 'por', 'favor',
-  'cuanto', 'cuesta', 'precio', 'comprar', 'quisiera', 'quiero', 'telefono', 'celular',
-  'este', 'esta', 'estos', 'estas', 'pantalla', 'bateria', 'funda', 'cargador',
-  'tarjeta', 'efectivo', 'pago', 'descuento', 'garantia', 'cambio', 'reparacion',
-  'si', 'no', 'muy', 'mas', 'pero', 'bien', 'donde', 'como', 'cuando', 'quien',
-  'nuevo', 'nueva', 'usado', 'antiguo', 'modelo', 'color', 'negro', 'blanco', 'azul'
+// Distinct Spanish indicators & common retail vocabulary
+const DISTINCT_SPANISH_WORDS = new Set([
+  'hola', 'buenos', 'buenas', 'dias', 'días', 'tardes', 'noches', 'gracias', 'favor',
+  'cuanto', 'cuánto', 'cuesta', 'cuestan', 'precio', 'comprar', 'quisiera', 'quiero', 'telefono', 'teléfono', 'celular',
+  'pantalla', 'bateria', 'batería', 'funda', 'cargador', 'tarjeta', 'efectivo', 'pago', 'descuento',
+  'garantia', 'garantía', 'cambio', 'reparacion', 'reparación', 'donde', 'dónde', 'como', 'cómo',
+  'cuando', 'cuándo', 'quien', 'quién', 'nuevo', 'nueva', 'nuevos', 'nuevas', 'usado', 'usada', 'antiguo',
+  'modelo', 'color', 'negro', 'blanco', 'azul', 'rojo', 'verde', 'dorado', 'plata',
+  'senor', 'señor', 'senora', 'señora', 'amigo', 'tienen', 'tiene', 'puedo', 'puede', 'ayuda',
+  'costo', 'vale', 'dinero', 'revisar', 'llevar', 'llevo', 'dame', 'estan', 'están', 'aqui', 'aquí',
+  'alla', 'allá', 'sobre', 'aquel', 'aquella', 'unos', 'unas', 'otro', 'otra', 'otros', 'otras',
+  'mucho', 'muchas', 'pocos', 'pocas', 'verdad', 'bienvenido', 'bienvenidos', 'disculpe', 'perdon', 'perdón'
+]);
+
+// Contextual Spanish functional words (counted only if accompanied by other indicators or grammatical markers)
+const CONTEXTUAL_SPANISH_WORDS = new Set([
+  'el', 'la', 'los', 'las', 'un', 'una', 'de', 'del', 'en', 'para', 'con', 'por',
+  'este', 'esta', 'estos', 'estas', 'esto', 'ese', 'esa', 'esos', 'esas', 'eso',
+  'que', 'qué', 'si', 'sí', 'mas', 'más', 'pero', 'bien', 'muy', 'yo', 'tu', 'tú', 'usted', 'nosotros', 'ellos'
 ]);
 
 /**
@@ -32,7 +43,7 @@ const SPANISH_INDICATORS = new Set([
 function containsSpanishOrForeignWords(text) {
   if (!text || typeof text !== 'string') return false;
   
-  // Check for Spanish specific characters (á, é, í, ó, ú, ñ, ¿, ¡, etc.)
+  // 1. Check for distinct Spanish orthographic characters (á, é, í, ó, ú, ñ, ¿, ¡, etc.)
   if (/[áéíóúÁÉÍÓÚñÑ¿¡]/.test(text)) {
     return true;
   }
@@ -40,15 +51,24 @@ function containsSpanishOrForeignWords(text) {
   const cleanWords = text.toLowerCase().replace(/[^a-záéíóúñ\s]/g, '').split(/\s+/).filter(Boolean);
   if (cleanWords.length === 0) return false;
 
-  let matchCount = 0;
+  let distinctMatches = 0;
+  let contextualMatches = 0;
+
   for (const word of cleanWords) {
-    if (SPANISH_INDICATORS.has(word)) {
-      matchCount++;
+    if (DISTINCT_SPANISH_WORDS.has(word)) {
+      distinctMatches++;
+    } else if (CONTEXTUAL_SPANISH_WORDS.has(word)) {
+      contextualMatches++;
     }
   }
 
-  // If at least one distinct Spanish word or 25% of words are Spanish
-  return matchCount >= 1;
+  // Definite Spanish if at least 1 distinct Spanish word is present
+  if (distinctMatches >= 1) return true;
+
+  // Or if multiple contextual Spanish words occur without strong English signals
+  if (contextualMatches >= 2) return true;
+
+  return false;
 }
 
 /**
@@ -211,14 +231,45 @@ async function translateToEnglish(sourceText) {
 
   const phraseReplacements = [
     [/hola/gi, 'hello'],
+    [/buenas tardes/gi, 'good afternoon'],
+    [/buenos d[ií]as/gi, 'good morning'],
+    [/buenas noches/gi, 'good evening'],
+    [/cu[aá]nto me dan por/gi, 'how much do you give me for'],
     [/cu[aá]nto cuesta/gi, 'how much does it cost'],
+    [/cu[aá]nto/gi, 'how much'],
+    [/cu[aá]nta/gi, 'how much'],
+    [/tienen financiamiento disponible/gi, 'do you have financing available'],
+    [/financiamiento disponible/gi, 'financing available'],
+    [/financiamiento/gi, 'financing'],
+    [/con tarjeta de cr[eé]dito/gi, 'with credit card'],
+    [/tarjeta de cr[eé]dito/gi, 'credit card'],
+    [/tarjeta/gi, 'card'],
+    [/efectivo/gi, 'cash'],
     [/el iphone/gi, 'the iPhone'],
     [/quisiera comprar/gi, 'I would like to buy'],
+    [/quiero comprar/gi, 'I want to buy'],
+    [/busco un/gi, 'I am looking for a'],
+    [/mi tel[eé]fono usado/gi, 'my used phone'],
+    [/tel[eé]fono usado/gi, 'used phone'],
+    [/tel[eé]fono/gi, 'phone'],
+    [/celular/gi, 'phone'],
+    [/programa de canje/gi, 'trade-in program'],
+    [/en el programa de canje/gi, 'in the trade-in program'],
+    [/canje/gi, 'trade-in'],
     [/un cargador nuevo/gi, 'a new charger'],
+    [/cargador/gi, 'charger'],
+    [/funda/gi, 'case'],
+    [/pantalla/gi, 'screen'],
+    [/bater[ií]a/gi, 'battery'],
+    [/nuevo/gi, 'new'],
+    [/nueva/gi, 'new'],
+    [/usado/gi, 'used'],
+    [/usada/gi, 'used'],
     [/puedo pagar con tarjeta de cr[eé]dito/gi, 'can I pay with credit card'],
-    [/buenos d[ií]as/gi, 'good morning'],
     [/precio/gi, 'price'],
     [/gracias/gi, 'thank you'],
+    [/por favor/gi, 'please'],
+    [/disculpe/gi, 'excuse me'],
   ];
 
   for (const [pattern, replacement] of phraseReplacements) {
@@ -227,6 +278,9 @@ async function translateToEnglish(sourceText) {
       translatedAny = true;
     }
   }
+
+  // Clean Spanish punctuation marks
+  translatedText = translatedText.replace(/[¿¡]/g, '');
 
   if (translatedAny) {
     const result = {
@@ -250,7 +304,21 @@ async function translateToEnglish(sourceText) {
   };
 }
 
+function detectLanguage(text) {
+  return containsSpanishOrForeignWords(text) ? 'es' : 'en';
+}
+
+async function ensureEnglishTranscript(text) {
+  const res = await translateToEnglish(text);
+  return {
+    ...res,
+    isTranslated: Boolean(res.wasTranslated),
+  };
+}
+
 module.exports = {
   translateToEnglish,
   containsSpanishOrForeignWords,
+  detectLanguage,
+  ensureEnglishTranscript,
 };

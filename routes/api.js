@@ -295,11 +295,19 @@ router.post('/sessions/:id/transcript', async (req, res) => {
       return res.status(404).json({ success: false, error: 'Session not found' });
     }
 
-    const realtimeAnalysis = analyzeRealtimeChunk(text, session.transcripts);
+    const { translateToEnglish } = require('../services/translationService');
+    const tr = await translateToEnglish(text);
+    const canonicalEnglish = tr.englishText || text;
+
+    const realtimeAnalysis = analyzeRealtimeChunk(canonicalEnglish, session.transcripts);
     const transcriptItem = {
       timestamp: new Date(),
-      speaker,
-      text,
+      speaker: (speaker || '').toLowerCase().includes('sales') ? 'sales_rep' : 'customer',
+      text: canonicalEnglish,
+      englishText: canonicalEnglish,
+      originalText: tr.originalText || text,
+      sourceLanguage: tr.sourceLanguage || 'en',
+      isTranslated: Boolean(tr.wasTranslated),
       confidence,
       signal: realtimeAnalysis.isClosingSignal ? 'CLOSING_SIGNAL' : (realtimeAnalysis.detectedObjection ? 'OBJECTION' : null)
     };
@@ -318,8 +326,8 @@ router.post('/sessions/:id/transcript', async (req, res) => {
       io.emit('live_session_update', {
         sessionId: session.sessionId,
         storeCode: session.storeCode,
-        latestText: text,
-        speaker,
+        latestText: canonicalEnglish,
+        speaker: transcriptItem.speaker,
         probability: realtimeAnalysis.probability
       });
     }
@@ -406,12 +414,21 @@ router.post('/sessions/:id/live-transcribe', uploadMemory.single('audioChunk'), 
       return res.json({ success: true, text: '', provider: sttResult.provider, note: 'Silence or no speech detected' });
     }
 
+    // Ensure translation to canonical English
+    const { translateToEnglish } = require('../services/translationService');
+    const tr = await translateToEnglish(transcribedText);
+    const canonicalEnglish = tr.englishText || transcribedText;
+
     // Realtime AI Intelligence
-    const realtimeAnalysis = analyzeRealtimeChunk(transcribedText, session.transcripts);
+    const realtimeAnalysis = analyzeRealtimeChunk(canonicalEnglish, session.transcripts);
     const transcriptItem = {
       timestamp: new Date(),
-      speaker,
-      text: transcribedText,
+      speaker: (speaker || '').toLowerCase().includes('sales') ? 'sales_rep' : 'customer',
+      text: canonicalEnglish,
+      englishText: canonicalEnglish,
+      originalText: tr.originalText || transcribedText,
+      sourceLanguage: tr.sourceLanguage || 'en',
+      isTranslated: Boolean(tr.wasTranslated),
       confidence: 0.96,
       signal: realtimeAnalysis.isClosingSignal ? 'CLOSING_SIGNAL' : (realtimeAnalysis.detectedObjection ? 'OBJECTION' : null)
     };
@@ -424,9 +441,13 @@ router.post('/sessions/:id/live-transcribe', uploadMemory.single('audioChunk'), 
     if (io) {
       const payload = {
         sessionId: session.sessionId,
-        text: transcribedText,
-        speaker,
+        text: canonicalEnglish,
+        englishText: canonicalEnglish,
+        originalText: transcriptItem.originalText,
+        speaker: transcriptItem.speaker,
         isFinal: true,
+        isTranslated: transcriptItem.isTranslated,
+        sourceLanguage: transcriptItem.sourceLanguage,
         confidence: 0.96,
         timestamp: new Date(),
         realtimeAI: realtimeAnalysis,
@@ -439,7 +460,7 @@ router.post('/sessions/:id/live-transcribe', uploadMemory.single('audioChunk'), 
         io.emit('deal_closure_detected', {
           sessionId: session.sessionId,
           signal: realtimeAnalysis.closingMatch,
-          text: transcribedText,
+          text: canonicalEnglish,
           timestamp: new Date()
         });
       }
@@ -629,52 +650,113 @@ router.get('/sessions/:id/analysis', async (req, res) => {
   }
 });
 
+function extractUserFromRequest(req) {
+  try {
+    const authHeader = req.headers.authorization;
+    let token = null;
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      token = authHeader.slice(7);
+    } else if (req.cookies && req.cookies.token) {
+      token = req.cookies.token;
+    }
+    if (token) {
+      const jwt = require('jsonwebtoken');
+      const { JWT_SECRET } = require('../middleware/auth');
+      return jwt.verify(token, JWT_SECRET);
+    }
+  } catch (e) {
+    // Return null
+  }
+  return null;
+}
+
+// ---------------- DAILY REPORTS & AI AUDIT (TASK 2) ----------------
+router.get('/reports/daily', async (req, res) => {
+  try {
+    const dailyReportService = require('../services/dailyReportService');
+    const user = extractUserFromRequest(req);
+    const report = await dailyReportService.getDailyReport(req.query, user);
+    res.json({ success: true, report, ...report });
+  } catch (err) {
+    console.error('Daily report query error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+router.get('/reports/daily/pdf', async (req, res) => {
+  try {
+    const dailyReportService = require('../services/dailyReportService');
+    const user = extractUserFromRequest(req);
+    const reportData = await dailyReportService.getDailyReport(req.query, user);
+    const doc = await dailyReportService.generateDailyReportPdf(reportData, user);
+
+    const arrayBuffer = doc.output('arraybuffer');
+    const pdfBuffer = Buffer.from(arrayBuffer);
+
+    const safeDate = String(reportData.dateLabel || 'Daily_Report').replace(/[^a-zA-Z0-9_-]/g, '_');
+    const filename = `Storelistener_Daily_Report_${safeDate}.pdf`;
+
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.setHeader('Content-Length', pdfBuffer.length);
+    res.send(pdfBuffer);
+  } catch (err) {
+    console.error('PDF generation endpoint error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 // Helper to build MongoDB filter for deal reports
-function buildDealReportsQuery(queryParams) {
-  const { store, storeCode, dateRange, startDate, endDate, outcome, buyingIntent, salesperson } = queryParams;
+function buildDealReportsQuery(queryParams, user = null) {
+  const { store, storeCode, dateRange, filterType, date, startDate, endDate, outcome, buyingIntent, salesperson, tzOffset } = queryParams;
   const filter = { status: 'completed' };
 
-  // Store filter
-  const targetStore = store || storeCode;
-  if (targetStore && targetStore !== 'all') {
-    const storeSyncService = require('../services/storeSyncService');
-    const cfg = storeSyncService.findStoreConfig(targetStore);
-    filter.$or = [
-      { storeCode: cfg.code },
-      { storeCode: cfg.id },
-      { storeCode: targetStore },
-      { storeId: targetStore },
-      { storeId: cfg.id },
-    ];
+  // Store filter & role-based isolation
+  if (user && user.role === 'sales_manager' && user.storeCode) {
+    filter.storeCode = user.storeCode;
+  } else {
+    const targetStore = store || storeCode;
+    if (targetStore && targetStore !== 'all') {
+      const storeSyncService = require('../services/storeSyncService');
+      const cfg = storeSyncService.findStoreConfig(targetStore);
+      filter.$or = [
+        { storeCode: cfg.code },
+        { storeCode: cfg.id },
+        { storeCode: targetStore },
+        { storeId: targetStore },
+        { storeId: cfg.id },
+      ];
+    }
   }
 
-  // Date range filter
-  const now = new Date();
-  if (dateRange && dateRange !== 'all') {
-    if (dateRange === 'today') {
-      const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-      filter.startedAt = { $gte: startOfDay };
-    } else if (dateRange === '7d') {
-      const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
-      filter.startedAt = { $gte: sevenDaysAgo };
-    } else if (dateRange === '30d') {
-      const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
-      filter.startedAt = { $gte: thirtyDaysAgo };
-    }
-  } else if (startDate || endDate) {
-    filter.startedAt = {};
-    if (startDate) filter.startedAt.$gte = new Date(startDate);
-    if (endDate) filter.startedAt.$lte = new Date(endDate);
+  // Consistent calendar range resolving via dailyReportService
+  const dailyReportService = require('../services/dailyReportService');
+  const resolved = dailyReportService.resolveDateRange({
+    filterType: filterType || dateRange || 'all',
+    date,
+    startDate,
+    endDate,
+    tzOffset,
+  });
+
+  if (dateRange !== 'all' || filterType || date || startDate || endDate) {
+    filter.startedAt = {
+      $gte: resolved.startDate,
+      $lte: resolved.endDate,
+    };
   }
 
   // Salesperson filter
   if (salesperson && salesperson !== 'all') {
-    filter.salesRep = new RegExp(salesperson, 'i');
+    filter.salesRep = new RegExp(salesperson.trim(), 'i');
   }
 
   // Outcome filter
   if (outcome && outcome !== 'all') {
-    filter['dealAnalysis.conversationOutcome'] = outcome;
+    filter.$or = [
+      { 'dealAnalysis.conversationOutcome': outcome },
+      { 'dealAnalysis.salesOutcome': outcome },
+    ];
   }
 
   // Buying Intent filter
@@ -688,8 +770,10 @@ function buildDealReportsQuery(queryParams) {
 // Aggregated deal insights & reporting view
 router.get('/analytics/deal-reports', async (req, res) => {
   try {
-    const filter = buildDealReportsQuery(req.query);
-    const sessions = await Session.find(filter).sort({ startedAt: -1 }).limit(200);
+    const user = extractUserFromRequest(req);
+    const filter = buildDealReportsQuery(req.query, user);
+    const sortOrder = req.query.sort === 'oldest' ? { startedAt: 1 } : { startedAt: -1 };
+    const sessions = await Session.find(filter).sort(sortOrder).limit(200);
 
     // Auto-analyze any completed sessions that don't have dealAnalysis yet
     const unanalyzed = sessions.filter(
@@ -839,7 +923,8 @@ router.get('/analytics/deal-reports', async (req, res) => {
 // CSV Export for filtered reports
 router.get('/analytics/export-csv', async (req, res) => {
   try {
-    const filter = buildDealReportsQuery(req.query);
+    const user = extractUserFromRequest(req);
+    const filter = buildDealReportsQuery(req.query, user);
     const sessions = await Session.find(filter).sort({ startedAt: -1 });
 
     const escapeCsv = (str) => {
