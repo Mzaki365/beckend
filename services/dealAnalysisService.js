@@ -114,7 +114,7 @@ class DealAnalysisService {
     if (customerLines.length === 0) return 'Not mentioned';
 
     const requirements = [];
-    const customerText = customerLines.map((t) => t.text).join(' ');
+    const customerText = customerLines.map((t) => t.englishText || t.text).join(' ');
     const lower = customerText.toLowerCase();
 
     if (lower.includes('upgrade') || lower.includes('old phone')) {
@@ -223,13 +223,13 @@ class DealAnalysisService {
     if (salesLines.length === 0) return 'Not mentioned';
 
     if (objections.length === 0) {
-      const firstHelpful = salesLines.find((l) => (l.text || '').length > 20);
-      return firstHelpful ? `Provided consultation: "${firstHelpful.text}"` : 'Provided consultative product overview.';
+      const firstHelpful = salesLines.find((l) => (l.englishText || l.text || '').length > 20);
+      return firstHelpful ? `Provided consultation: "${firstHelpful.englishText || firstHelpful.text}"` : 'Provided consultative product overview.';
     }
 
     // Look for responses that address price, financing, trade-in, or features
     const responseHints = [];
-    const salesText = salesLines.map((l) => l.text).join(' ');
+    const salesText = salesLines.map((l) => l.englishText || l.text).join(' ');
     const lower = salesText.toLowerCase();
 
     if (lower.includes('financing') || lower.includes('monthly') || lower.includes('0%')) {
@@ -363,7 +363,7 @@ class DealAnalysisService {
     const firstCustomer = transcripts.find((t) => (t.speaker || '').toLowerCase() === 'customer');
     if (firstCustomer) {
       moments.push({
-        excerpt: firstCustomer.text,
+        excerpt: firstCustomer.englishText || firstCustomer.text,
         speaker: 'Customer',
         significance: 'Customer initial inquiry / requirement statement'
       });
@@ -371,11 +371,11 @@ class DealAnalysisService {
 
     // 2. Objection / question moment
     for (const t of transcripts) {
-      const lower = (t.text || '').toLowerCase();
+      const lower = (t.englishText || t.text || '').toLowerCase();
       if (OBJECTION_PATTERNS.some((o) => o.keywords.some((k) => lower.includes(k)))) {
-        if (!moments.some((m) => m.excerpt === t.text)) {
+        if (!moments.some((m) => m.excerpt === (t.englishText || t.text))) {
           moments.push({
-            excerpt: t.text,
+            excerpt: t.englishText || t.text,
             speaker: (t.speaker || '').toLowerCase().includes('sales') ? 'Salesperson' : 'Customer',
             significance: 'Key customer consideration or objection voiced'
           });
@@ -387,20 +387,20 @@ class DealAnalysisService {
     // 3. Decisive outcome moment
     if (outcome === 'Sale Confirmed') {
       const saleLine = transcripts.find((t) =>
-        EXPLICIT_SALE_PHRASES.some((p) => (t.text || '').toLowerCase().includes(p))
+        EXPLICIT_SALE_PHRASES.some((p) => (t.englishText || t.text || '').toLowerCase().includes(p))
       );
-      if (saleLine && !moments.some((m) => m.excerpt === saleLine.text)) {
+      if (saleLine && !moments.some((m) => m.excerpt === (saleLine.englishText || saleLine.text))) {
         moments.push({
-          excerpt: saleLine.text,
+          excerpt: saleLine.englishText || saleLine.text,
           speaker: (saleLine.speaker || '').toLowerCase().includes('sales') ? 'Salesperson' : 'Customer',
           significance: 'Sale confirmation and transaction commitment'
         });
       }
     } else {
       const lastLine = transcripts[transcripts.length - 1];
-      if (lastLine && !moments.some((m) => m.excerpt === lastLine.text)) {
+      if (lastLine) {
         moments.push({
-          excerpt: lastLine.text,
+          excerpt: lastLine.englishText || lastLine.text,
           speaker: (lastLine.speaker || '').toLowerCase().includes('sales') ? 'Salesperson' : 'Customer',
           significance: 'Closing interaction or departure remark'
         });
@@ -459,7 +459,7 @@ class DealAnalysisService {
     if (!apiKey) return null;
 
     const fullDialogue = transcripts
-      .map((t) => `${(t.speaker || '').toUpperCase()}: ${t.text}`)
+      .map((t) => `${(t.speaker || '').toUpperCase()}: ${t.englishText || t.text}`)
       .join('\n');
 
     const prompt = `You are a senior Apple Retail Intelligence AI. Analyze the following verified in-store sales conversation transcript:

@@ -35,15 +35,26 @@ const CONTEXTUAL_SPANISH_WORDS = new Set([
   'que', 'qué', 'si', 'sí', 'mas', 'más', 'pero', 'bien', 'muy', 'yo', 'tu', 'tú', 'usted', 'nosotros', 'ellos'
 ]);
 
+// Regular expressions for detecting non-English scripts
+const DEVANAGARI_REGEX = /[\u0900-\u097F]/;
+const PERSO_ARABIC_REGEX = /[\u0600-\u06FF\u0750-\u077F\uFB50-\uFDFF\uFE70-\uFEFF]/;
+const GURMUKHI_REGEX = /[\u0A00-\u0A7F]/;
+const OTHER_FOREIGN_SCRIPT_REGEX = /[\u0400-\u04FF\u4E00-\u9FFF\u3040-\u30FF\uAC00-\uD7AF]/;
+
 /**
- * Checks if a string contains Spanish characters or vocabulary
+ * Checks if a string contains Spanish vocabulary, orthography, or non-English scripts (Devanagari/Hindi, etc.)
  * @param {string} text
  * @returns {boolean}
  */
 function containsSpanishOrForeignWords(text) {
   if (!text || typeof text !== 'string') return false;
   
-  // 1. Check for distinct Spanish orthographic characters (á, é, í, ó, ú, ñ, ¿, ¡, etc.)
+  // 1. Immediately flag Devanagari (Hindi) or other non-Latin foreign scripts
+  if (DEVANAGARI_REGEX.test(text) || PERSO_ARABIC_REGEX.test(text) || GURMUKHI_REGEX.test(text) || OTHER_FOREIGN_SCRIPT_REGEX.test(text)) {
+    return true;
+  }
+
+  // 2. Check for distinct Spanish orthographic characters (á, é, í, ó, ú, ñ, ¿, ¡, etc.)
   if (/[áéíóúÁÉÍÓÚñÑ¿¡]/.test(text)) {
     return true;
   }
@@ -295,16 +306,26 @@ async function translateToEnglish(sourceText) {
     return result;
   }
 
-  // If all translation attempts fail, return original with wasTranslated: false
+  // If all translation attempts fail, preserve original for auditability, but prevent raw foreign script in englishText
+  const isDevanagariOrNonLatin = DEVANAGARI_REGEX.test(trimmed) || PERSO_ARABIC_REGEX.test(trimmed) || GURMUKHI_REGEX.test(trimmed);
+  const detectedSource = DEVANAGARI_REGEX.test(trimmed)
+    ? 'hi'
+    : (PERSO_ARABIC_REGEX.test(trimmed) ? 'ur' : (GURMUKHI_REGEX.test(trimmed) ? 'pa' : 'es'));
+
   return {
-    englishText: trimmed,
+    englishText: isDevanagariOrNonLatin ? '[Translation unavailable: non-English speech]' : trimmed,
     originalText: trimmed,
     wasTranslated: false,
-    sourceLanguage: 'auto',
+    sourceLanguage: detectedSource,
+    translationError: isDevanagariOrNonLatin ? 'Translation unavailable for recognized non-English speech' : null,
   };
 }
 
 function detectLanguage(text) {
+  if (!text || typeof text !== 'string') return 'en';
+  if (DEVANAGARI_REGEX.test(text)) return 'hi';
+  if (PERSO_ARABIC_REGEX.test(text)) return 'ur';
+  if (GURMUKHI_REGEX.test(text)) return 'pa';
   return containsSpanishOrForeignWords(text) ? 'es' : 'en';
 }
 

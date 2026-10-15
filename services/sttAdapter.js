@@ -62,23 +62,29 @@ function createStreamingSession({
   }
 
   // 2. Build Deepgram WebSocket URL
-  // Parameters verified per Deepgram official documentation:
-  // - model: 'nova-3'
-  // - language: 'multi' enables multilingual recognition (Spanish, English, etc.)
-  // - smart_format: true (auto-formats dates, numbers, currency)
-  // - punctuate: true
-  // - interim_results: true (delivers streaming partials)
-  // - diarize: true (identifies speaker turns)
+  // Configured for direct English transcription with retail vocabulary hints
+  const sttLanguage = process.env.DEEPGRAM_LANGUAGE || (language && language !== 'multi' ? language : 'en');
   const queryParams = new URLSearchParams({
     model: process.env.DEEPGRAM_MODEL || model || 'nova-3',
-    language: 'multi',
+    language: sttLanguage,
     smart_format: 'true',
     punctuate: 'true',
     interim_results: 'true',
     diarize: 'true',
-    endpointing: 'false',
-    utterance_end_ms: '1500',
+    endpointing: '300',
+    utterance_end_ms: '1000',
   });
+
+  // Domain vocabulary hints to ensure domain-specific words (iPhone models, accessories, trade-in) are transcribed accurately
+  queryParams.append('keywords', 'iPhone:2');
+  queryParams.append('keywords', 'AppleCare:2');
+  queryParams.append('keywords', 'Pro Max:2');
+  queryParams.append('keywords', 'trade-in:2');
+  queryParams.append('keywords', 'financing:2');
+  queryParams.append('keywords', 'MagSafe:2');
+  queryParams.append('keywords', 'AirPods:2');
+  queryParams.append('keywords', 'storage:2');
+  queryParams.append('keywords', 'warranty:2');
 
   const deepgramUrl = `wss://api.deepgram.com/v1/listen?${queryParams.toString()}`;
 
@@ -88,6 +94,9 @@ function createStreamingSession({
   let bufferedChunks = [];
   let keepAliveTimer = null;
   let reconnectTimer = null;
+  let messageQueue = Promise.resolve();
+  let lastFinalizedEnd = 0;
+  let utteranceCount = 0;
 
   function startKeepAlive() {
     stopKeepAlive();
@@ -156,74 +165,97 @@ function createStreamingSession({
         }
       });
 
-      ws.on('message', async (data) => {
-        try {
-          const message = JSON.parse(data.toString());
+      ws.on('message', (data) => {
+        messageQueue = messageQueue.then(async () => {
+          try {
+            const message = JSON.parse(data.toString());
 
-          // Handle Deepgram Results payload
-          if (message.type === 'Results' && message.channel) {
-            const alternative = message.channel.alternatives && message.channel.alternatives[0];
-            const transcriptText = alternative?.transcript?.trim();
+            // Handle Deepgram Results payload
+            if (message.type === 'Results' && message.channel) {
+              const alternative = message.channel.alternatives && message.channel.alternatives[0];
+              const transcriptText = alternative?.transcript?.trim();
 
-            if (transcriptText && transcriptText.length > 0) {
-              const isFinal = Boolean(message.is_final || message.speech_final);
+              if (transcriptText && transcriptText.length > 0) {
+                const isFinal = Boolean(message.is_final || message.speech_final);
+                const confidence = alternative.confidence != null ? Number(alternative.confidence.toFixed(2)) : 0.95;
 
-              // Determine speaker label from word diarization if present
-              let speakerLabel = null;
-              if (alternative.words && alternative.words.length > 0) {
-                const firstWord = alternative.words[0];
-                if (firstWord && typeof firstWord.speaker === 'number') {
-                  speakerLabel = `Speaker ${firstWord.speaker}`;
+                const startTime = typeof message.start === 'number' ? Number(message.start.toFixed(2)) : null;
+                const duration = typeof message.duration === 'number' ? Number(message.duration.toFixed(2)) : null;
+                const endTime = startTime !== null && duration !== null ? Number((startTime + duration).toFixed(2)) : null;
+
+                // Guard: If an interim partial arrives for a time window that is already finalized, ignore it to prevent duplicated/appended partials
+                if (!isFinal && endTime !== null && endTime <= lastFinalizedEnd) {
+                  return;
                 }
-              }
 
-              const startTime = typeof message.start === 'number' ? message.start : null;
-              const duration = typeof message.duration === 'number' ? message.duration : null;
-              const endTime = startTime !== null && duration !== null ? Number((startTime + duration).toFixed(2)) : null;
-
-              // Perform English translation pipeline for multilingual speech (Spanish, etc.)
-              let englishText = transcriptText;
-              let originalText = transcriptText;
-              let wasTranslated = false;
-              let sourceLanguage = 'en';
-
-              try {
-                const translationResult = await translateToEnglish(transcriptText);
-                if (translationResult) {
-                  englishText = translationResult.englishText || transcriptText;
-                  originalText = translationResult.originalText || transcriptText;
-                  wasTranslated = translationResult.wasTranslated || false;
-                  sourceLanguage = translationResult.sourceLanguage || 'en';
+                // If final, advance lastFinalizedEnd boundary
+                if (isFinal) {
+                  lastFinalizedEnd = Math.max(lastFinalizedEnd, endTime || startTime || 0);
+                  utteranceCount++;
                 }
-              } catch (transErr) {
-                console.warn(`[STT Translation] Note for session ${sessionId}:`, transErr.message);
-              }
 
-              const segment = {
-                segmentId: `seg_${sessionId}_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
-                sessionId,
-                speaker: speakerLabel || 'Speaker',
-                text: englishText,
-                englishText,
-                originalText: wasTranslated ? originalText : transcriptText,
-                isTranslated: wasTranslated,
-                sourceLanguage,
-                targetLanguage: 'en',
-                confidence: alternative.confidence || 0.95,
-                startTime,
-                endTime,
-                isFinal,
-                receivedAt: new Date().toISOString(),
-              };
+                // Determine speaker label from word diarization if present
+                let speakerLabel = null;
+                if (alternative.words && alternative.words.length > 0) {
+                  const firstWord = alternative.words[0];
+                  if (firstWord && typeof firstWord.speaker === 'number') {
+                    speakerLabel = `Speaker ${firstWord.speaker}`;
+                  }
+                }
 
-              if (onSegment) {
-                onSegment(segment);
+                // Stable segment ID: based on utterance start time so partials and final result share the same canonical segmentId
+                const startKey = startTime !== null ? startTime.toFixed(2) : String(utteranceCount);
+                const segmentId = `seg_${sessionId}_${startKey}`;
+
+                // Perform English translation pipeline for multilingual speech (Spanish, etc.)
+                let englishText = transcriptText;
+                let originalText = transcriptText;
+                let wasTranslated = false;
+                let sourceLanguage = 'en';
+
+                try {
+                  const translationResult = await translateToEnglish(transcriptText);
+                  if (translationResult) {
+                    englishText = translationResult.englishText || transcriptText;
+                    originalText = translationResult.originalText || transcriptText;
+                    wasTranslated = translationResult.wasTranslated || false;
+                    sourceLanguage = translationResult.sourceLanguage || 'en';
+                  }
+                } catch (transErr) {
+                  console.warn(`[STT Translation] Note for session ${sessionId}:`, transErr.message);
+                }
+
+                // Prevent Devanagari script from ever appearing in the final English transcript
+                if (/[\u0900-\u097F]/.test(englishText)) {
+                  englishText = '[Translation unavailable: non-English speech]';
+                }
+
+                const segment = {
+                  segmentId,
+                  sessionId,
+                  speaker: speakerLabel || 'Speaker',
+                  text: englishText,
+                  englishText,
+                  originalText: wasTranslated ? originalText : transcriptText,
+                  isTranslated: wasTranslated,
+                  sourceLanguage,
+                  targetLanguage: 'en',
+                  confidence,
+                  startTime,
+                  endTime,
+                  isFinal,
+                  receivedAt: new Date().toISOString(),
+                };
+
+                if (onSegment) {
+                  onSegment(segment);
+                }
               }
             }
+          } catch (err) {
+            console.warn(`[Deepgram] Parse note for session ${sessionId}:`, err.message);
           }
-        } catch (err) {
-          console.warn(`[Deepgram] Parse note for session ${sessionId}:`, err.message);
-        }
+        });
       });
 
       ws.on('error', (err) => {

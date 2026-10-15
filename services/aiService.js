@@ -91,10 +91,7 @@ const COPILOT_SUGGESTIONS = [
   { trigger: 'applecare', suggestion: '💡 Mention theft & loss coverage + instant express screen replacement.' },
   { trigger: 'protect', suggestion: '💡 Bundle MagSafe silicone case + 20W USB-C adapter at 15% promotional discount.' },
   { trigger: 'think about it', suggestion: '💡 Ask: "What specific spec or price point can I clarify before you leave today?"' },
-  { trigger: 'camera', suggestion: '💡 Highlight 48MP Fusion Camera, Camera Control button, and 5x optical telephoto zoom.' },
-  { trigger: 'مہنگا', suggestion: '💡 اردو گائیڈ: کسٹمر کو انسٹالمنٹ پلان اور پرانے فون کے ایکسچینج بونس کی آفر دیں۔' },
-  { trigger: 'mehnga', suggestion: '💡 Guide: Offer installment plan and trade-in discount on old device.' },
-  { trigger: 'ڈسکاؤنٹ', suggestion: '💡 20W فاسٹ چارجر یا میگ سیف کور پر اسپیشل 15% رعایت کی پیشکش کریں۔' }
+  { trigger: 'discount', suggestion: '💡 Offer a special 15% bundled promotion on a 20W fast charger or protective MagSafe case.' }
 ];
 
 /**

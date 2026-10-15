@@ -377,10 +377,15 @@ class StoreSyncService {
       }
     }
 
+    // Ensure Devanagari script is never emitted as canonical English
+    if (/[\u0900-\u097F]/.test(englishText)) {
+      englishText = '[Translation unavailable: non-English speech]';
+    }
+
     const cfg = this.sessionToStore.get(sessionId) || this.findStoreConfig(this.getSessionStoreCode(sessionId) || payload.storeId || payload.storeCode);
     const buffer = this.activeTranscripts.get(sessionId) || [];
     const item = {
-      segmentId: segmentId || `seg_${Date.now()}_${Math.random().toString(36).substr(2, 4)}`,
+      segmentId: segmentId || `seg_${sessionId}_${Date.now()}`,
       timestamp: timestamp ? new Date(timestamp) : new Date(),
       speaker: speaker || 'Customer',
       text: englishText,
@@ -389,15 +394,12 @@ class StoreSyncService {
       isFinal: !!isFinal,
       sourceLanguage: detectedSourceLang,
       isTranslated: wasTranslated,
+      confidence: payload.confidence != null ? payload.confidence : 0.95,
     };
 
     if (isFinal) {
-      // Deduplication guard: ignore repeated segments with identical segmentId or identical text within 2 seconds
-      const isDuplicate = buffer.some(
-        (b) => b.segmentId === item.segmentId ||
-          (b.text.toLowerCase() === item.text.toLowerCase() &&
-           Math.abs(new Date(b.timestamp).getTime() - new Date(item.timestamp).getTime()) < 2000)
-      );
+      // Deduplication guard: deduplicate strictly by segmentId
+      const isDuplicate = buffer.some((b) => b.segmentId === item.segmentId);
 
       if (!isDuplicate) {
         buffer.push(item);
@@ -417,7 +419,7 @@ class StoreSyncService {
                   originalText: item.originalText,
                   sourceLanguage: item.sourceLanguage,
                   isTranslated: item.isTranslated,
-                  confidence: 0.95,
+                  confidence: item.confidence,
                 },
               },
             }

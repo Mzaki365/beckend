@@ -917,7 +917,7 @@ Rules:
         const transcriptLines = (conv.transcripts || []).map((t, tIdx) => {
           const time = t.timestamp ? new Date(t.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : `#${tIdx + 1}`;
           const transTag = t.isTranslated ? ' [Translated]' : '';
-          return [time, `${t.speaker}${transTag}`, t.text];
+          return [time, `${t.speaker}${transTag}`, t.englishText || t.text || ''];
         });
 
         if (transcriptLines.length > 0) {
