@@ -377,10 +377,6 @@ class StoreSyncService {
       }
     }
 
-    // Ensure Devanagari script is never emitted as canonical English
-    if (/[\u0900-\u097F]/.test(englishText)) {
-      englishText = '[Translation unavailable: non-English speech]';
-    }
 
     const cfg = this.sessionToStore.get(sessionId) || this.findStoreConfig(this.getSessionStoreCode(sessionId) || payload.storeId || payload.storeCode);
     const buffer = this.activeTranscripts.get(sessionId) || [];

@@ -12,7 +12,7 @@
  */
 
 const WebSocket = require('ws');
-const { translateToEnglish, containsSpanishOrForeignWords } = require('./translationService');
+const { translateToEnglish, isSpanishText, containsSpanishOrForeignWords } = require('./translationService');
 
 /**
  * Creates a real-time streaming STT session
@@ -62,8 +62,8 @@ function createStreamingSession({
   }
 
   // 2. Build Deepgram WebSocket URL
-  // Configured for direct English transcription with retail keyterms on Nova-3
-  const sttLanguage = process.env.DEEPGRAM_LANGUAGE || (language && language !== 'multi' ? language : 'en');
+  // Configured for multilingual Nova-3 transcription (supporting English & Spanish speech)
+  const sttLanguage = process.env.DEEPGRAM_LANGUAGE || language || 'multi';
   const queryParams = new URLSearchParams({
     model: process.env.DEEPGRAM_MODEL || model || 'nova-3',
     language: sttLanguage,
@@ -195,32 +195,28 @@ function createStreamingSession({
                 const startKey = startTime !== null ? startTime.toFixed(2) : String(utteranceCount);
                 const segmentId = `seg_${sessionId}_${startKey}`;
 
-                // Perform English translation pipeline for multilingual speech (Spanish, etc.)
+                // Spanish-to-English translation pipeline:
+                // 1. English speech: Keep in English exactly as recognized without rewriting or translation.
+                // 2. Spanish speech: Detect Spanish speech and translate to English before final transcript display.
+                // 3. Other languages: Do NOT translate. Retain recognized text verbatim without guessing.
+                // 4. Incomplete partials: Stream as recognized directly without translation thrashing or duplication.
                 let englishText = transcriptText;
                 let originalText = transcriptText;
                 let wasTranslated = false;
                 let sourceLanguage = 'en';
 
-                // For interim partials: if purely English, pass through immediately for zero latency
-                // For final segments or text with foreign indicators: translate through pipeline
-                const needsTranslation = containsSpanishOrForeignWords(transcriptText);
-                if (isFinal || needsTranslation) {
+                if (isFinal && isSpanishText(transcriptText)) {
                   try {
                     const translationResult = await translateToEnglish(transcriptText);
-                    if (translationResult) {
+                    if (translationResult && translationResult.wasTranslated) {
                       englishText = translationResult.englishText || transcriptText;
                       originalText = translationResult.originalText || transcriptText;
-                      wasTranslated = translationResult.wasTranslated || false;
-                      sourceLanguage = translationResult.sourceLanguage || 'en';
+                      wasTranslated = true;
+                      sourceLanguage = 'es';
                     }
                   } catch (transErr) {
                     console.warn(`[STT Translation] Note for session ${sessionId}:`, transErr.message);
                   }
-                }
-
-                // Prevent Devanagari script from ever appearing in the final English transcript
-                if (/[\u0900-\u097F]/.test(englishText)) {
-                  englishText = '[Translation unavailable: non-English speech]';
                 }
 
                 const segment = {
