@@ -150,13 +150,22 @@ router.get('/sessions', async (req, res) => {
     const sortOrder = sort === 'oldest' ? { startedAt: 1 } : { startedAt: -1 };
     const skip = (parseInt(page) - 1) * parseInt(limit);
 
-    const [sessions, total] = await Promise.all([
+    const [rawSessions, total] = await Promise.all([
       Session.find(query)
         .sort(sortOrder)
         .skip(skip)
         .limit(parseInt(limit)),
       Session.countDocuments(query),
     ]);
+
+    const sessions = rawSessions.map((s) => {
+      const doc = s.toObject ? s.toObject() : { ...s };
+      if (!doc.audioUrl && doc.audioFileName) {
+        doc.audioUrl = `/uploads/${doc.audioFileName}`;
+      }
+      doc.hasAudio = Boolean(doc.audioUrl || doc.audioFileName);
+      return doc;
+    });
 
     res.json({ success: true, total, sessions });
   } catch (err) {
@@ -173,7 +182,12 @@ router.get('/sessions/:id', async (req, res) => {
     if (!session) {
       return res.status(404).json({ success: false, error: 'Session not found' });
     }
-    res.json({ success: true, session });
+    const doc = session.toObject ? session.toObject() : { ...session };
+    if (!doc.audioUrl && doc.audioFileName) {
+      doc.audioUrl = `/uploads/${doc.audioFileName}`;
+    }
+    doc.hasAudio = Boolean(doc.audioUrl || doc.audioFileName);
+    res.json({ success: true, session: doc });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
