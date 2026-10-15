@@ -12,7 +12,7 @@
  */
 
 const WebSocket = require('ws');
-const { translateToEnglish } = require('./translationService');
+const { translateToEnglish, containsSpanishOrForeignWords } = require('./translationService');
 
 /**
  * Creates a real-time streaming STT session
@@ -62,7 +62,7 @@ function createStreamingSession({
   }
 
   // 2. Build Deepgram WebSocket URL
-  // Configured for direct English transcription with retail vocabulary hints
+  // Configured for direct English transcription with retail keyterms on Nova-3
   const sttLanguage = process.env.DEEPGRAM_LANGUAGE || (language && language !== 'multi' ? language : 'en');
   const queryParams = new URLSearchParams({
     model: process.env.DEEPGRAM_MODEL || model || 'nova-3',
@@ -72,19 +72,13 @@ function createStreamingSession({
     interim_results: 'true',
     diarize: 'true',
     endpointing: '300',
-    utterance_end_ms: '1000',
   });
 
-  // Domain vocabulary hints to ensure domain-specific words (iPhone models, accessories, trade-in) are transcribed accurately
-  queryParams.append('keywords', 'iPhone:2');
-  queryParams.append('keywords', 'AppleCare:2');
-  queryParams.append('keywords', 'Pro Max:2');
-  queryParams.append('keywords', 'trade-in:2');
-  queryParams.append('keywords', 'financing:2');
-  queryParams.append('keywords', 'MagSafe:2');
-  queryParams.append('keywords', 'AirPods:2');
-  queryParams.append('keywords', 'storage:2');
-  queryParams.append('keywords', 'warranty:2');
+  // Boost common retail domain terms using Nova-3's keyterm parameter
+  const keyterms = ['iPhone', 'AppleCare', 'trade-in', 'financing', 'MagSafe', 'AirPods', 'warranty'];
+  for (const term of keyterms) {
+    queryParams.append('keyterm', term);
+  }
 
   const deepgramUrl = `wss://api.deepgram.com/v1/listen?${queryParams.toString()}`;
 
@@ -183,12 +177,6 @@ function createStreamingSession({
                 const duration = typeof message.duration === 'number' ? Number(message.duration.toFixed(2)) : null;
                 const endTime = startTime !== null && duration !== null ? Number((startTime + duration).toFixed(2)) : null;
 
-                // Guard: If an interim partial arrives for a time window that is already finalized, ignore it to prevent duplicated/appended partials
-                if (!isFinal && endTime !== null && endTime <= lastFinalizedEnd) {
-                  return;
-                }
-
-                // If final, advance lastFinalizedEnd boundary
                 if (isFinal) {
                   lastFinalizedEnd = Math.max(lastFinalizedEnd, endTime || startTime || 0);
                   utteranceCount++;
@@ -213,16 +201,21 @@ function createStreamingSession({
                 let wasTranslated = false;
                 let sourceLanguage = 'en';
 
-                try {
-                  const translationResult = await translateToEnglish(transcriptText);
-                  if (translationResult) {
-                    englishText = translationResult.englishText || transcriptText;
-                    originalText = translationResult.originalText || transcriptText;
-                    wasTranslated = translationResult.wasTranslated || false;
-                    sourceLanguage = translationResult.sourceLanguage || 'en';
+                // For interim partials: if purely English, pass through immediately for zero latency
+                // For final segments or text with foreign indicators: translate through pipeline
+                const needsTranslation = containsSpanishOrForeignWords(transcriptText);
+                if (isFinal || needsTranslation) {
+                  try {
+                    const translationResult = await translateToEnglish(transcriptText);
+                    if (translationResult) {
+                      englishText = translationResult.englishText || transcriptText;
+                      originalText = translationResult.originalText || transcriptText;
+                      wasTranslated = translationResult.wasTranslated || false;
+                      sourceLanguage = translationResult.sourceLanguage || 'en';
+                    }
+                  } catch (transErr) {
+                    console.warn(`[STT Translation] Note for session ${sessionId}:`, transErr.message);
                   }
-                } catch (transErr) {
-                  console.warn(`[STT Translation] Note for session ${sessionId}:`, transErr.message);
                 }
 
                 // Prevent Devanagari script from ever appearing in the final English transcript
@@ -260,7 +253,7 @@ function createStreamingSession({
 
       ws.on('error', (err) => {
         console.error(`[Deepgram STT] WebSocket Error for session ${sessionId}:`, err.message);
-        if (onError && isClosing) {
+        if (onError) {
           onError({
             error: `Speech-to-text connection error: ${err.message}`,
             sessionId,
