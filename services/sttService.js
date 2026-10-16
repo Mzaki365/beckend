@@ -15,13 +15,14 @@ async function transcribeAudio(audioBuffer, mimeType = 'audio/webm', language = 
 
   const targetLang = (language || '').toLowerCase().startsWith('es') ? 'es' : ((language || '').toLowerCase().startsWith('en') ? 'en' : null);
 
-  // 1. Try Groq Whisper
+  // 1. Try Groq Whisper (greedy decoding: temperature 0 to eliminate hallucination/prediction)
   if (groqKey) {
     try {
       const formData = new FormData();
       const blob = new Blob([audioBuffer], { type: mimeType });
       formData.append('file', blob, 'audio.webm');
       formData.append('model', 'whisper-large-v3');
+      formData.append('temperature', '0.0');
       if (targetLang) {
         formData.append('language', targetLang);
       }
@@ -44,13 +45,14 @@ async function transcribeAudio(audioBuffer, mimeType = 'audio/webm', language = 
     }
   }
 
-  // 2. Try OpenAI Whisper
+  // 2. Try OpenAI Whisper (greedy decoding: temperature 0 to eliminate hallucination/prediction)
   if (openaiKey) {
     try {
       const formData = new FormData();
       const blob = new Blob([audioBuffer], { type: mimeType });
       formData.append('file', blob, 'audio.webm');
       formData.append('model', 'whisper-1');
+      formData.append('temperature', '0.0');
       if (targetLang) {
         formData.append('language', targetLang);
       }
@@ -72,7 +74,7 @@ async function transcribeAudio(audioBuffer, mimeType = 'audio/webm', language = 
     }
   }
 
-  // 3. Try Google Gemini Flash (multimodal audio)
+  // 3. Try Google Gemini Flash (multimodal audio with strict verbatim prompt & 0 temperature)
   if (geminiKey) {
     try {
       const base64Audio = audioBuffer.toString('base64');
@@ -89,11 +91,19 @@ async function transcribeAudio(audioBuffer, mimeType = 'audio/webm', language = 
                 }
               },
               {
-                text: `You are an accurate retail speech-to-text engine. Listen to this in-store audio clip and transcribe verbatim what was spoken in ${langPrompt}. If spoken in Spanish, transcribe in Spanish. If spoken in English, transcribe in English. Return ONLY the transcribed text without any markdown or extra explanation. If silent or unintelligible, return an empty string.`
+                text: `You are a strict, verbatim speech-to-text transcriber. Listen to this in-store audio clip and transcribe strictly and accurately ONLY what was spoken in ${langPrompt}.
+Do NOT predict, extrapolate, or guess missing words.
+Do NOT complete sentences that were cut off or inaudible.
+If spoken in Spanish, transcribe in Spanish. If spoken in English, transcribe in English.
+Return ONLY the transcribed text without any markdown or extra explanation. If silent or unintelligible, return an empty string.`
               }
             ]
           }
-        ]
+        ],
+        generationConfig: {
+          temperature: 0.0,
+          maxOutputTokens: 512
+        }
       };
 
       const modelsToTry = ['gemini-flash-latest', 'gemini-2.5-flash'];

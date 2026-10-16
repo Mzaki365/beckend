@@ -71,7 +71,9 @@ function createStreamingSession({
     punctuate: 'true',
     interim_results: 'true',
     diarize: 'true',
-    endpointing: '300',
+    endpointing: '500',
+    numerals: 'true',
+    utterance_end_ms: '1000',
   });
 
   // Boost common retail domain terms using Nova-3's keyterm parameter
@@ -176,6 +178,24 @@ function createStreamingSession({
                 const startTime = typeof message.start === 'number' ? Number(message.start.toFixed(2)) : null;
                 const duration = typeof message.duration === 'number' ? Number(message.duration.toFixed(2)) : null;
                 const endTime = startTime !== null && duration !== null ? Number((startTime + duration).toFixed(2)) : null;
+
+                // Strict accuracy guard: reject low-confidence acoustic guesses or noise hallucinations
+                // Transcribe ONLY what is clearly understood; do not predict or fabricate words
+                let avgWordConfidence = confidence;
+                if (alternative.words && alternative.words.length > 0) {
+                  const sumConf = alternative.words.reduce((sum, w) => sum + (w.confidence != null ? w.confidence : 1), 0);
+                  avgWordConfidence = sumConf / alternative.words.length;
+                }
+
+                if (isFinal && (confidence < 0.45 || avgWordConfidence < 0.40)) {
+                  return;
+                }
+
+                // Guard against repetitive hallucination loops (e.g. "you you you you")
+                const wordsArr = transcriptText.split(/\s+/);
+                if (wordsArr.length >= 4 && new Set(wordsArr.map(w => w.toLowerCase())).size === 1) {
+                  return;
+                }
 
                 if (isFinal) {
                   lastFinalizedEnd = Math.max(lastFinalizedEnd, endTime || startTime || 0);

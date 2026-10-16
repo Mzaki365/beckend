@@ -266,7 +266,8 @@ async function translateWithGemini(text) {
         {
           parts: [
             {
-              text: `You are an accurate retail speech translation engine. Translate the following spoken Spanish dialogue into natural, accurate English.
+              text: `You are a strict, literal speech translation engine. Translate ONLY what was actually spoken in the Spanish sentence into English.
+Do NOT predict, elaborate, embellish, or guess missing thoughts.
 Return ONLY the direct English translation without surrounding quotes, notes, or explanations.
 
 Spanish: "${text}"`
@@ -275,7 +276,7 @@ Spanish: "${text}"`
         }
       ],
       generationConfig: {
-        temperature: 0.1,
+        temperature: 0.0,
         maxOutputTokens: 256
       }
     };
