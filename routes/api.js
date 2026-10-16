@@ -806,8 +806,14 @@ router.get('/reports/daily', async (req, res) => {
   try {
     const dailyReportService = require('../services/dailyReportService');
     const user = extractUserFromRequest(req);
-    const report = await dailyReportService.getDailyReport(req.query, user);
-    res.json({ success: true, report, ...report });
+    // If explicit generate=true or refresh=true, generate or update analysis
+    if (req.query.generate === 'true' || req.query.refresh === 'true') {
+      const report = await dailyReportService.generateOrUpdateDailyReport(req.query, user);
+      return res.json({ success: true, ...report });
+    }
+    // Otherwise, fetch existing saved report without silently creating a new analysis
+    const report = await dailyReportService.getSavedDailyReport(req.query, user);
+    res.json({ success: true, ...report });
   } catch (err) {
     console.error('Daily report query error:', err);
     res.status(500).json({ success: false, error: err.message });
@@ -818,8 +824,8 @@ router.post('/reports/daily/analyze', async (req, res) => {
   try {
     const dailyReportService = require('../services/dailyReportService');
     const user = extractUserFromRequest(req);
-    const report = await dailyReportService.getDailyReport({ ...req.body, ...req.query, refresh: true }, user);
-    res.json({ success: true, report, ...report });
+    const report = await dailyReportService.generateOrUpdateDailyReport({ ...req.body, ...req.query, refresh: true }, user);
+    res.json({ success: true, ...report });
   } catch (err) {
     console.error('Daily report analyze error:', err);
     res.status(500).json({ success: false, error: err.message });
@@ -830,13 +836,17 @@ router.get('/reports/daily/pdf', async (req, res) => {
   try {
     const dailyReportService = require('../services/dailyReportService');
     const user = extractUserFromRequest(req);
-    const reportData = await dailyReportService.getDailyReport(req.query, user);
-    const doc = await dailyReportService.generateDailyReportPdf(reportData, user);
+    // Fetch saved report; if none exists, generate so PDF has content
+    let reportData = await dailyReportService.getSavedDailyReport(req.query, user);
+    if (!reportData || !reportData.hasReport) {
+      reportData = await dailyReportService.generateOrUpdateDailyReport(req.query, user);
+    }
+    const doc = await dailyReportService.generateDailyReportPdf(reportData.report || reportData, user);
 
     const arrayBuffer = doc.output('arraybuffer');
     const pdfBuffer = Buffer.from(arrayBuffer);
 
-    const safeDate = String(reportData.dateLabel || 'Daily_Report').replace(/[^a-zA-Z0-9_-]/g, '_');
+    const safeDate = String(reportData.dateLabel || reportData.date || 'Daily_Report').replace(/[^a-zA-Z0-9_-]/g, '_');
     const filename = `Storelistener_Daily_Report_${safeDate}.pdf`;
 
     res.setHeader('Content-Type', 'application/pdf');

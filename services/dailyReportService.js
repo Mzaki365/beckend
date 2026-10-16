@@ -1,19 +1,22 @@
 /**
- * Storelistener — Daily Reports, Calendar Analytics & PDF Engine (Task 2)
+ * Storelistener — Daily Reports, Calendar Analytics & PDF Engine (Task 2 & Accuracy Overhaul)
  * File: services/dailyReportService.js
  *
  * Implements:
- * 1. Calendar-based single date, quick filter, and custom date range querying with consistent business timezone.
- * 2. Daily summary and sales analytics with strict data integrity (verified vs unverified distinction).
- * 3. Individual conversation analyses with all 13 required audit dimensions and complete English transcripts.
- * 4. Daily-level AI summary synthesizing underlying conversation reports (reusing persisted reports).
- * 5. Multi-day range support with date-wise breakdowns and overall summary.
- * 6. Native backend PDF generation adhering to the 8-point executive structure.
+ * 1. Strict separation of deterministic business metrics from AI-generated interpretations.
+ * 2. Deterministic calculations: Total conversations (unique, deduplicated), verified sales,
+ *    verified revenue, average ticket, duration, word count, missed opportunities, and real stock levels.
+ * 3. Calendar date management with canonical business timezone (America/New_York) and zero-drift boundaries.
+ * 4. Stored report management: View existing report without silent generation; on-demand AI analysis;
+ *    and non-duplicating refresh/update with data freshness and stale detection.
+ * 5. Grounded AI summary synthesized strictly from underlying conversation transcripts and deal audits.
+ * 6. Native executive PDF generation adhering to the 8-point corporate structure.
  */
 
 const crypto = require('crypto');
 const Session = require('../models/Session');
 const DailyReport = require('../models/DailyReport');
+const Inventory = require('../models/Inventory');
 const dealAnalysisService = require('./dealAnalysisService');
 const { jsPDF } = require('jspdf');
 const rawAutoTable = require('jspdf-autotable');
@@ -22,114 +25,129 @@ const autoTable = typeof rawAutoTable === 'function' ? rawAutoTable : (rawAutoTa
 // Canonical business timezone for Storelistener retail operations
 const DEFAULT_BUSINESS_TIMEZONE = 'America/New_York';
 
+/**
+ * Computes exact UTC boundaries for a given YYYY-MM-DD date in the business timezone
+ * @param {string} dateStr - 'YYYY-MM-DD'
+ * @param {string} timeZone - e.g. 'America/New_York'
+ * @returns {{ startDate: Date, endDate: Date, offsetMinutes: number }}
+ */
+function getBusinessDateBoundaries(dateStr, timeZone = DEFAULT_BUSINESS_TIMEZONE) {
+  const parts = String(dateStr).match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+  if (!parts) {
+    const fallback = new Date();
+    return {
+      startDate: new Date(fallback.setHours(0, 0, 0, 0)),
+      endDate: new Date(fallback.setHours(23, 59, 59, 999)),
+      offsetMinutes: 240,
+    };
+  }
+
+  const year = parseInt(parts[1], 10);
+  const month = parseInt(parts[2], 10);
+  const day = parseInt(parts[3], 10);
+
+  // Compute timezone offset at noon UTC on the target date
+  const approxUtc = new Date(Date.UTC(year, month - 1, day, 12, 0, 0));
+  const dtfParts = new Intl.DateTimeFormat('en-US', {
+    timeZone,
+    timeZoneName: 'longOffset',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  }).formatToParts(approxUtc);
+
+  const tzPart = dtfParts.find((p) => p.type === 'timeZoneName')?.value;
+  let offsetMinutes = 240; // Default EDT (UTC-4 is 240 mins)
+  if (tzPart) {
+    const match = tzPart.match(/GMT([+-])(\d{1,2}):?(\d{2})?/);
+    if (match) {
+      const sign = match[1] === '-' ? 1 : -1;
+      const hours = parseInt(match[2], 10);
+      const mins = match[3] ? parseInt(match[3], 10) : 0;
+      offsetMinutes = sign * (hours * 60 + mins);
+    }
+  }
+
+  // 00:00:00.000 in business timezone maps to:
+  const startUtcMs = Date.UTC(year, month - 1, day, 0, 0, 0, 0) + (offsetMinutes * 60 * 1000);
+  const endUtcMs = startUtcMs + (24 * 60 * 60 * 1000) - 1;
+
+  return {
+    startDate: new Date(startUtcMs),
+    endDate: new Date(endUtcMs),
+    offsetMinutes,
+  };
+}
+
 class DailyReportService {
   /**
-   * Resolves date boundaries respecting business timezone
+   * Resolves date boundaries respecting the canonical business timezone
    * @param {Object} params
-   * @returns {{ startDate: Date, endDate: Date, dateLabel: string, isSingleDay: boolean, daysCount: number, dateKeys: string[] }}
+   * @returns {{ startDate: Date, endDate: Date, date: string, dateLabel: string, isSingleDay: boolean, daysCount: number, businessTimezone: string, reportingDateRule: string }}
    */
   resolveDateRange(params = {}) {
     const {
-      filterType = 'today', // 'today' | 'yesterday' | '7d' | 'last_7_days' | 'custom' | 'single'
-      date, // YYYY-MM-DD
-      startDate, // YYYY-MM-DD or ISO
-      endDate, // YYYY-MM-DD or ISO
-      tzOffset = 240, // default EDT (UTC-4 is 240 minutes)
+      filterType = 'today',
+      date,
+      startDate,
+      endDate,
+      businessTimezone = DEFAULT_BUSINESS_TIMEZONE,
     } = params;
 
-    const offsetMs = parseInt(tzOffset, 10) * 60 * 1000;
-    const nowServer = new Date();
-    // Current time in business timezone
-    const nowBizMs = nowServer.getTime() - (nowServer.getTimezoneOffset() * 60 * 1000) - offsetMs;
-    const nowBiz = new Date(nowBizMs);
+    const timeZone = businessTimezone || DEFAULT_BUSINESS_TIMEZONE;
+    const now = new Date();
 
+    let targetDateStr = '';
+    let isSingleDay = false;
     let start = null;
     let end = null;
     let dateLabel = '';
-    let isSingleDay = false;
 
-    // Helper to get UTC midnight for a YYYY-MM-DD in the business timezone
-    const getBizMidnight = (y, m, d) => {
-      // Midnight in business timezone maps to UTC ms:
-      return Date.UTC(y, m - 1, d, 0, 0, 0, 0) + offsetMs;
-    };
-
-    if (filterType === 'today' || (!date && !startDate && filterType !== 'yesterday' && filterType !== '7d' && filterType !== 'last_7_days')) {
-      const y = nowBiz.getUTCFullYear();
-      const m = nowBiz.getUTCMonth() + 1;
-      const d = nowBiz.getUTCDate();
-      const startMs = getBizMidnight(y, m, d);
-      const endMs = startMs + (24 * 60 * 60 * 1000) - 1; // End of business day
-      start = new Date(startMs);
-      end = new Date(endMs);
-      const dateStr = `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
-      dateLabel = `Today (${dateStr})`;
+    if (date && (filterType === 'single' || !startDate)) {
+      // Explicit single date 'YYYY-MM-DD'
+      targetDateStr = String(date).slice(0, 10);
+      const bounds = getBusinessDateBoundaries(targetDateStr, timeZone);
+      start = bounds.startDate;
+      end = bounds.endDate;
+      dateLabel = targetDateStr;
       isSingleDay = true;
     } else if (filterType === 'yesterday') {
-      const yestBiz = new Date(nowBiz.getTime() - 24 * 60 * 60 * 1000);
-      const y = yestBiz.getUTCFullYear();
-      const m = yestBiz.getUTCMonth() + 1;
-      const d = yestBiz.getUTCDate();
-      const startMs = getBizMidnight(y, m, d);
-      const endMs = startMs + (24 * 60 * 60 * 1000) - 1;
-      start = new Date(startMs);
-      end = new Date(endMs);
-      const dateStr = `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
-      dateLabel = `Yesterday (${dateStr})`;
+      const yesterday = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+      targetDateStr = new Intl.DateTimeFormat('en-CA', { timeZone }).format(yesterday);
+      const bounds = getBusinessDateBoundaries(targetDateStr, timeZone);
+      start = bounds.startDate;
+      end = bounds.endDate;
+      dateLabel = `Yesterday (${targetDateStr})`;
       isSingleDay = true;
     } else if (filterType === '7d' || filterType === 'last_7_days') {
-      const y = nowBiz.getUTCFullYear();
-      const m = nowBiz.getUTCMonth() + 1;
-      const d = nowBiz.getUTCDate();
-      const endMs = getBizMidnight(y, m, d) + (24 * 60 * 60 * 1000) - 1;
-      const startMs = endMs - (7 * 24 * 60 * 60 * 1000) + 1;
-      start = new Date(startMs);
-      end = new Date(endMs);
+      const todayStr = new Intl.DateTimeFormat('en-CA', { timeZone }).format(now);
+      const todayBounds = getBusinessDateBoundaries(todayStr, timeZone);
+      end = todayBounds.endDate;
+      start = new Date(end.getTime() - (7 * 24 * 60 * 60 * 1000) + 1);
       dateLabel = 'Last 7 Days';
       isSingleDay = false;
-    } else if (date && (filterType === 'single' || !startDate)) {
-      // Explicit single date YYYY-MM-DD
-      const match = String(date).match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
-      if (match) {
-        const y = parseInt(match[1], 10);
-        const m = parseInt(match[2], 10);
-        const d = parseInt(match[3], 10);
-        const startMs = getBizMidnight(y, m, d);
-        const endMs = startMs + (24 * 60 * 60 * 1000) - 1;
-        start = new Date(startMs);
-        end = new Date(endMs);
-        dateLabel = `${match[1]}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
-        isSingleDay = true;
-      }
+      targetDateStr = todayStr;
     } else if (startDate && endDate) {
-      // Custom date range
-      const matchStart = String(startDate).match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
-      const matchEnd = String(endDate).match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
-
-      const y1 = matchStart ? parseInt(matchStart[1], 10) : new Date(startDate).getUTCFullYear();
-      const m1 = matchStart ? parseInt(matchStart[2], 10) : new Date(startDate).getUTCMonth() + 1;
-      const d1 = matchStart ? parseInt(matchStart[3], 10) : new Date(startDate).getUTCDate();
-
-      const y2 = matchEnd ? parseInt(matchEnd[1], 10) : new Date(endDate).getUTCFullYear();
-      const m2 = matchEnd ? parseInt(matchEnd[2], 10) : new Date(endDate).getUTCMonth() + 1;
-      const d2 = matchEnd ? parseInt(matchEnd[3], 10) : new Date(endDate).getUTCDate();
-
-      const startMs = getBizMidnight(y1, m1, d1);
-      const endMs = getBizMidnight(y2, m2, d2) + (24 * 60 * 60 * 1000) - 1;
-
-      start = new Date(startMs);
-      end = new Date(endMs);
-      const sStr = `${y1}-${String(m1).padStart(2, '0')}-${String(d1).padStart(2, '0')}`;
-      const eStr = `${y2}-${String(m2).padStart(2, '0')}-${String(d2).padStart(2, '0')}`;
+      const sStr = String(startDate).slice(0, 10);
+      const eStr = String(endDate).slice(0, 10);
+      const sBounds = getBusinessDateBoundaries(sStr, timeZone);
+      const eBounds = getBusinessDateBoundaries(eStr, timeZone);
+      start = sBounds.startDate;
+      end = eBounds.endDate;
       dateLabel = sStr === eStr ? sStr : `${sStr} to ${eStr}`;
       isSingleDay = sStr === eStr;
-    }
-
-    if (!start || !end) {
-      // Fallback: full current day
-      start = new Date(nowServer.setHours(0, 0, 0, 0));
-      end = new Date(nowServer.setHours(23, 59, 59, 999));
-      dateLabel = 'Current Date';
+      targetDateStr = sStr;
+    } else {
+      // Default: 'today' in business timezone
+      targetDateStr = new Intl.DateTimeFormat('en-CA', { timeZone }).format(now);
+      const bounds = getBusinessDateBoundaries(targetDateStr, timeZone);
+      start = bounds.startDate;
+      end = bounds.endDate;
+      dateLabel = `Today (${targetDateStr})`;
       isSingleDay = true;
     }
 
@@ -138,33 +156,36 @@ class DailyReportService {
     return {
       startDate: start,
       endDate: end,
+      date: targetDateStr,
       dateLabel,
       isSingleDay,
       daysCount,
-      tzOffsetMinutes: parseInt(tzOffset, 10),
-      businessTimezone: params.businessTimezone || DEFAULT_BUSINESS_TIMEZONE,
+      businessTimezone: timeZone,
+      reportingDateRule: `Conversations and transactions are attributed by their immutable startedAt timestamp in ${timeZone} business time.`,
     };
   }
 
   /**
-   * Computes a stable hash of conversation IDs and their transcript lengths
+   * Computes a stable MD5 hash of conversation IDs, statuses, and metrics for freshness auditing
    */
   computeConversationsHash(sessions = []) {
     if (!Array.isArray(sessions) || sessions.length === 0) return 'empty';
-    const tokens = sessions.map((s) => `${s.sessionId}:${s.status}:${s.dealAnalysis?.analysisStatus}:${s.transcripts?.length || 0}`);
+    const tokens = sessions
+      .map((s) => `${s.sessionId}:${s.status}:${s.verifiedSale || false}:${s.verifiedRevenue || 0}:${s.dealAnalysis?.salesOutcome || 'none'}:${s.transcripts?.length || 0}`)
+      .sort();
     return crypto.createHash('md5').update(tokens.join('|')).digest('hex');
   }
 
   /**
-   * Builds MongoDB filter adhering to role permissions, date range, store, and rep
+   * Builds MongoDB filter adhering to role permissions, date boundaries, and store scoping
    */
   buildFilter(range, options = {}, user = null) {
     const filter = {
-      status: 'completed',
       startedAt: {
         $gte: range.startDate,
         $lte: range.endDate,
       },
+      status: 'completed',
     };
 
     // Store isolation
@@ -199,7 +220,190 @@ class DailyReportService {
   }
 
   /**
-   * Synthesizes daily-level AI summary from the underlying conversation reports
+   * Calculates all deterministic business metrics purely from authoritative records
+   * @param {Array<Object>} sessions - Deduplicated array of completed Session documents
+   * @param {Object} options - { storeCode }
+   * @returns {Promise<Object>} Calculated metrics & data limitations
+   */
+  async calculateAuthoritativeMetrics(sessions = [], options = {}) {
+    const totalCompleted = sessions.length;
+
+    let completedAnalysisCount = 0;
+    let pendingAnalysisCount = 0;
+    let failedAnalysisCount = 0;
+
+    let wonCount = 0;
+    let lostCount = 0;
+    let pendingCount = 0;
+    let inconclusiveCount = 0;
+
+    let verifiedSalesCount = 0;
+    let verifiedRevenueTotal = 0;
+    let hasVerifiedRevenue = false;
+
+    let totalDurationSeconds = 0;
+    let totalWordCount = 0;
+    let insufficientEvidenceCount = 0;
+
+    for (const s of sessions) {
+      totalDurationSeconds += (s.durationSeconds || 0);
+
+      // Final transcript word count calculation
+      const transcripts = Array.isArray(s.transcripts) ? s.transcripts : [];
+      const sessionWords = transcripts.reduce((acc, t) => {
+        const text = (t.englishText || t.text || '').trim();
+        return acc + (text ? text.split(/\s+/).filter(Boolean).length : 0);
+      }, 0);
+      totalWordCount += sessionWords;
+
+      const da = s.dealAnalysis || {};
+      const aStatus = da.analysisStatus || 'completed';
+      if (aStatus === 'completed') completedAnalysisCount++;
+      else if (aStatus === 'pending' || aStatus === 'analyzing') pendingAnalysisCount++;
+      else if (aStatus === 'failed') failedAnalysisCount++;
+
+      // Deal outcome
+      let salesOutcome = da.salesOutcome;
+      if (!salesOutcome) {
+        const raw = da.conversationOutcome || s.analytics?.dealOutcome;
+        if (raw === 'Sale Confirmed' || raw === 'won') salesOutcome = 'Won';
+        else if (raw === 'Not Converted' || raw === 'lost') salesOutcome = 'Lost';
+        else if (raw === 'Follow-up Required' || raw === 'in_negotiation') salesOutcome = 'Pending';
+        else salesOutcome = 'Inconclusive';
+      }
+
+      if (salesOutcome === 'Won') wonCount++;
+      else if (salesOutcome === 'Lost') lostCount++;
+      else if (salesOutcome === 'Pending') pendingCount++;
+      else inconclusiveCount++;
+
+      // Strict Sale Verification Rule:
+      // Count only transactions confirmed by authoritative sales record or explicitly verified source.
+      // Customer statements such as "I'll buy it" in dialogue are NEVER treated as verified sales without record verification.
+      // Cancelled or refunded transactions are strictly excluded.
+      const isCancelled = s.status === 'cancelled' || s.transactionStatus === 'cancelled' || s.transactionStatus === 'refunded';
+      const isSaleVerified = Boolean(s.verifiedSale === true || (s.transactionId && s.isSaleVerified === true)) && !isCancelled;
+
+      if (isSaleVerified) {
+        verifiedSalesCount++;
+        if (typeof s.verifiedRevenue === 'number' && !isNaN(s.verifiedRevenue) && s.verifiedRevenue > 0) {
+          verifiedRevenueTotal += s.verifiedRevenue;
+          hasVerifiedRevenue = true;
+        }
+      }
+
+      if (salesOutcome === 'Inconclusive' || sessionWords < 15 || transcripts.length < 2) {
+        insufficientEvidenceCount++;
+      }
+    }
+
+    // Average Ticket: Verified revenue divided by verified completed sales
+    const avgTicket = (verifiedSalesCount > 0 && verifiedRevenueTotal > 0)
+      ? Math.round(verifiedRevenueTotal / verifiedSalesCount)
+      : null;
+    const avgTicketDisplay = avgTicket != null ? `$${avgTicket.toLocaleString()}` : 'N/A';
+    const verifiedRevenueDisplay = hasVerifiedRevenue ? `$${verifiedRevenueTotal.toLocaleString()}` : '$0';
+
+    // Missed Opportunities:
+    // Distinguish unconverted consultations (lostCount) from telephony missed calls and door traffic (which are unmonitored).
+    const missedOpportunitiesCount = lostCount;
+    const missedOpportunitiesDisplay = lostCount > 0 ? `${lostCount} unconverted` : '0';
+    const missedOpportunitiesExplanation = `${lostCount} completed customer consultation(s) concluded without a purchase. (Note: Physical walk-bys and telephone call-center queues are N/A — counter audio tracking only).`;
+
+    // Low Stock Products:
+    // Check actual Inventory collection in MongoDB
+    let lowStockCount = null;
+    let lowStockDisplay = 'N/A';
+    let lowStockExplanation = 'Inventory management system not connected. Stock thresholds cannot be evaluated.';
+    let lowStockItems = [];
+
+    try {
+      const invQuery = {};
+      if (options.storeCode && options.storeCode !== 'all') {
+        invQuery.storeCode = options.storeCode;
+      }
+      const totalInventoryItems = await Inventory.countDocuments(invQuery);
+      if (totalInventoryItems > 0) {
+        // Authoritative inventory data exists!
+        const lowItems = await Inventory.find({
+          ...invQuery,
+          $expr: { $lte: ['$currentStock', '$lowStockThreshold'] },
+        }).lean();
+
+        lowStockCount = lowItems.length;
+        lowStockItems = lowItems.map((item) => ({
+          productName: item.productName,
+          sku: item.sku,
+          storeCode: item.storeCode,
+          currentStock: item.currentStock,
+          lowStockThreshold: item.lowStockThreshold,
+        }));
+        lowStockDisplay = String(lowStockCount);
+        lowStockExplanation = lowStockCount > 0
+          ? `${lowStockCount} product(s) currently at or below configured stock threshold.`
+          : 'All catalog products currently above safety threshold.';
+      }
+    } catch (invErr) {
+      // Graceful fallback to limitation explanation
+    }
+
+    const conversionRate = totalCompleted > 0 ? Math.round((wonCount / totalCompleted) * 100) : 0;
+    const followUpRate = totalCompleted > 0 ? Math.round((pendingCount / totalCompleted) * 100) : 0;
+
+    // Performance headline
+    const activityLevel = (totalCompleted >= 6 || verifiedSalesCount >= 2) ? 'Active' : (totalCompleted >= 2 || verifiedSalesCount >= 1) ? 'Moderate' : 'Quiet';
+    const headline = hasVerifiedRevenue
+      ? `${activityLevel} day, $${verifiedRevenueTotal.toLocaleString()} in sales, ${totalCompleted} conversation${totalCompleted === 1 ? '' : 's'}`
+      : `${activityLevel} day — no sales, ${totalCompleted} conversation${totalCompleted === 1 ? '' : 's'}`;
+    const headlineExplanation = totalCompleted === 0
+      ? 'Quiet day — no conversations recorded and no verified sales.'
+      : `${activityLevel} day with ${totalCompleted} recorded customer consultation${totalCompleted > 1 ? 's' : ''} across store counters. ${verifiedSalesCount > 0 ? `Confirmed ${verifiedSalesCount} verified sales transaction${verifiedSalesCount > 1 ? 's' : ''} generating ${verifiedRevenueDisplay}.` : 'No confirmed customer transactions recorded for this business date.'}`;
+
+    const dataLimitations = [
+      'Telephony call logs & physical foot-traffic door cameras: N/A — audio monitoring is counter-terminal focused.',
+      lowStockCount === null
+        ? 'Inventory database connection: N/A — low-stock alerts require external POS/ERP inventory sync.'
+        : 'Inventory reflects current stock levels, not historical end-of-day snapshots.',
+      'Customer statements such as "I\'ll buy it" are recorded as verbal buying intent, not verified revenue.',
+    ];
+
+    return {
+      metrics: {
+        totalCompleted,
+        completedAnalysisCount,
+        pendingAnalysisCount,
+        failedAnalysisCount,
+        wonCount,
+        lostCount,
+        pendingCount,
+        inconclusiveCount,
+        verifiedSalesCount,
+        verifiedRevenue: hasVerifiedRevenue ? verifiedRevenueTotal : null,
+        verifiedRevenueDisplay,
+        avgTicket,
+        avgTicketDisplay,
+        missedOpportunitiesCount,
+        missedOpportunitiesDisplay,
+        missedOpportunitiesExplanation,
+        lowStockCount,
+        lowStockDisplay,
+        lowStockExplanation,
+        lowStockItems,
+        totalDurationSeconds,
+        totalWordCount,
+        activityLevel,
+        headline,
+        headlineExplanation,
+        insufficientEvidenceCount,
+        conversionRate,
+        followUpRate,
+      },
+      dataLimitations,
+    };
+  }
+
+  /**
+   * Synthesizes daily-level AI summary strictly grounded in underlying conversation records
    */
   async generateDailyAiSummary(sessions = [], dateLabel = '') {
     if (sessions.length === 0) {
@@ -207,17 +411,17 @@ class DailyReportService {
         commonCustomerNeeds: 'No completed conversations recorded for this period.',
         frequentlyDiscussedProducts: [],
         recurringObjections: [],
-        salesOutcomesSummary: 'Zero conversations completed in the selected window.',
+        salesOutcomesSummary: 'Zero consultations completed in the selected window.',
         salespersonStrengths: [],
         areasForImprovement: [],
         followUpPriorities: [],
-        actionableRecommendations: ['Ensure counter recording stations are active and online during business hours.'],
+        actionableRecommendations: ['Ensure counter recording stations are online and staff engage customers promptly as they browse.'],
         provider: 'deterministic',
         generatedAt: new Date(),
       };
     }
 
-    // 1. Deterministic Aggregation across all persisted conversation analyses
+    // 1. Deterministic aggregation across all conversation analyses
     const productFrequency = new Map();
     const objectionFrequency = new Map();
     const needsList = [];
@@ -230,7 +434,7 @@ class DailyReportService {
       const sc = s.scorecard || {};
 
       if (da.customerRequirements && da.customerRequirements !== 'Not mentioned') {
-        needsList.push(da.customerRequirements);
+        needsList.push(`${da.customerRequirements} (${s.sessionId})`);
       }
 
       if (Array.isArray(da.productsDiscussed)) {
@@ -263,7 +467,7 @@ class DailyReportService {
 
     const topProducts = Array.from(productFrequency.entries())
       .sort((a, b) => b[1] - a[1])
-      .map(([p, count]) => `${p} (${count} conversation${count > 1 ? 's' : ''})`);
+      .map(([p, count]) => `${p} (${count} discussion${count > 1 ? 's' : ''})`);
 
     const topObjections = Array.from(objectionFrequency.entries())
       .sort((a, b) => b[1] - a[1])
@@ -277,9 +481,9 @@ class DailyReportService {
     const apiKey = process.env.GEMINI_API_KEY;
     if (apiKey && sessions.length >= 1) {
       try {
-        const miniBriefs = sessions.slice(0, 30).map((s, idx) => {
+        const miniBriefs = sessions.slice(0, 25).map((s, idx) => {
           const da = s.dealAnalysis || {};
-          return `Conversation #${idx + 1} (${s.storeCode}, Rep: ${s.salesRep || 'Specialist'}, Outcome: ${da.salesOutcome || 'Inconclusive'}):
+          return `Conversation #${idx + 1} (${s.sessionId}, Store: ${s.storeCode}, Rep: ${s.salesRep || 'Specialist'}, Outcome: ${da.salesOutcome || 'Inconclusive'}):
 - Requirements: ${da.customerRequirements || 'N/A'}
 - Products: ${(da.productsDiscussed || []).join(', ') || 'N/A'}
 - Objections: ${(da.customerObjections || []).join(', ') || 'None'}
@@ -294,7 +498,7 @@ ${miniBriefs}
 
 Return a valid JSON object matching this schema:
 {
-  "commonCustomerNeeds": "Synthesized paragraph detailing customer intent, primary hardware demands, trade-in considerations, and budget drivers.",
+  "commonCustomerNeeds": "Synthesized paragraph detailing customer intent, primary hardware demands, trade-in considerations, and budget drivers grounded in citations.",
   "frequentlyDiscussedProducts": ["Product 1 (X discussions)", "Product 2 (Y discussions)"],
   "recurringObjections": ["Objection 1 with context", "Objection 2 with context"],
   "salesOutcomesSummary": "Concise summary of deal closures, pending consultations, and customer drop-offs.",
@@ -318,7 +522,7 @@ Rules:
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({
                 contents: [{ parts: [{ text: prompt }] }],
-                generationConfig: { temperature: 0.2, responseMimeType: 'application/json' },
+                generationConfig: { temperature: 0.0, responseMimeType: 'application/json' },
               }),
               signal: AbortSignal.timeout(6000),
             });
@@ -332,7 +536,7 @@ Rules:
                     commonCustomerNeeds: parsed.commonCustomerNeeds,
                     frequentlyDiscussedProducts: parsed.frequentlyDiscussedProducts || topProducts,
                     recurringObjections: parsed.recurringObjections || topObjections,
-                    salesOutcomesSummary: parsed.salesOutcomesSummary || 'Daily outcomes aggregated.',
+                    salesOutcomesSummary: parsed.salesOutcomesSummary || 'Daily outcomes aggregated from verified records.',
                     salespersonStrengths: parsed.salespersonStrengths || uniqueStrengths,
                     areasForImprovement: parsed.areasForImprovement || uniqueAreas,
                     followUpPriorities: parsed.followUpPriorities || uniqueFollowUps,
@@ -348,7 +552,7 @@ Rules:
           }
         }
       } catch (geminiErr) {
-        console.warn('[Daily AI Summary] Gemini synthesis note:', geminiErr.message);
+        console.warn('[Daily AI Summary] Gemini note:', geminiErr.message);
       }
     }
 
@@ -374,17 +578,191 @@ Rules:
   }
 
   /**
-   * Main entry point: Generates or retrieves Daily Report and AI synthesis
+   * Formats a session document into the canonical 13-dimension individual conversation report
    */
-  async getDailyReport(params = {}, user = null) {
+  formatConversationReport(session) {
+    const da = session.dealAnalysis || {};
+    const sc = session.scorecard || {};
+
+    let salesOutcome = da.salesOutcome;
+    if (!salesOutcome) {
+      const raw = da.conversationOutcome || session.analytics?.dealOutcome;
+      if (raw === 'Sale Confirmed' || raw === 'won') salesOutcome = 'Won';
+      else if (raw === 'Not Converted' || raw === 'lost') salesOutcome = 'Lost';
+      else if (raw === 'Follow-up Required' || raw === 'in_negotiation') salesOutcome = 'Pending';
+      else salesOutcome = 'Inconclusive';
+    }
+
+    const isCancelled = session.status === 'cancelled' || session.transactionStatus === 'cancelled' || session.transactionStatus === 'refunded';
+    const isSaleVerified = Boolean(session.verifiedSale === true || (session.transactionId && session.isSaleVerified === true)) && !isCancelled;
+
+    const transcripts = Array.isArray(session.transcripts) ? session.transcripts : [];
+    const englishTranscripts = transcripts.map((t) => ({
+      timestamp: t.timestamp,
+      speaker: t.speaker === 'sales_rep' ? 'Sales Specialist' : 'Customer',
+      text: t.englishText || t.text || '',
+      originalText: t.originalText || t.text || '',
+      isTranslated: Boolean(t.isTranslated),
+      sourceLanguage: t.sourceLanguage || 'en',
+    }));
+
+    const wordCount = englishTranscripts.reduce((acc, t) => acc + (t.text || '').trim().split(/\s+/).filter(Boolean).length, 0);
+
+    return {
+      conversationId: session.sessionId || session._id,
+      sessionId: session.sessionId,
+      date: session.startedAt ? new Date(session.startedAt).toISOString().slice(0, 10) : 'N/A',
+      startedAt: session.startedAt,
+      endedAt: session.endedAt,
+      durationSeconds: session.durationSeconds || 0,
+      durationFormatted: session.durationSeconds ? `${Math.floor(session.durationSeconds / 60)}m ${session.durationSeconds % 60}s` : '0s',
+      storeCode: session.storeCode,
+      storeName: session.storeName,
+      salesperson: session.salesRep || 'Sales Specialist',
+      terminal: session.deviceId || 'Counter 01',
+      transcripts: englishTranscripts,
+      transcriptCount: englishTranscripts.length,
+      executiveSummary: da.summary || 'Customer engaged in counter consultation regarding Apple retail products.',
+      customerRequirements: da.customerRequirements || 'Not mentioned',
+      customerBuyingIntent: da.customerBuyingIntent || 'Unclear',
+      customerQuestions: da.customerQuestions || [],
+      productsDiscussed: da.productsDiscussed || [],
+      budgetAndPrice: da.budgetAndPrice || 'Not mentioned',
+      salesOutcome,
+      conversationOutcome: da.conversationOutcome || salesOutcome,
+      outcomeEvidence: da.outcomeExplanation || (
+        salesOutcome === 'Won'
+          ? 'Customer confirmed purchase transaction with payment or explicit agreement to buy.'
+          : salesOutcome === 'Lost'
+          ? 'Customer rejected offer or cited prohibitive constraints without buying.'
+          : salesOutcome === 'Pending'
+          ? 'Customer expressed purchase intent but requested time or scheduled follow-up consultation.'
+          : 'Dialogue concluded without recorded transaction or closure statement.'
+      ),
+      isSaleVerified,
+      verifiedStatusLabel: isSaleVerified ? 'Verified Sale (Transaction Confirmed)' : 'Unverified (Verbal Agreement / Discussion Only)',
+      verifiedRevenue: session.verifiedRevenue != null ? session.verifiedRevenue : null,
+      transactionId: session.transactionId || null,
+      customerObjections: da.customerObjections || [],
+      salespersonResponse: da.salespersonResponse || 'Provided consultative product overview.',
+      salespersonPerformance: {
+        overallScore: sc.overallScore != null ? sc.overallScore : null,
+        strengths: sc.coachingFeedback?.handledWell || ['Courteous counter engagement'],
+        areasToImprove: sc.coachingFeedback?.areasToImprove || ['Clarify budget and trade-in earlier in conversation'],
+        missedOpportunity: sc.coachingFeedback?.missedOpportunity || 'None identified in dialogue',
+        evidenceQuote: sc.coachingFeedback?.evidenceQuote || '',
+      },
+      nextRecommendedAction: da.nextRecommendedAction || 'Follow up with customer within 24 hours.',
+      analysisStatus: da.analysisStatus || 'completed',
+      limitations: 'Single-channel counter audio. Diarization speaker roles estimated from retail conversation cues.',
+      hasAudio: Boolean(session.audioUrl || session.audioFileName),
+      audioUrl: session.audioUrl || (session.audioFileName ? `/uploads/${session.audioFileName}` : `/api/sessions/${session.sessionId}/audio`),
+      audioFileName: session.audioFileName || null,
+      sentiment: (session.scorecard?.sentiment || da.sentiment || (salesOutcome === 'Won' ? 'POSITIVE' : salesOutcome === 'Lost' ? 'NEGATIVE' : 'NEUTRAL')).toUpperCase(),
+      wordCount,
+      coachingNote: sc.coachingFeedback?.actionableCoaching || (englishTranscripts.length === 0 ? 'No speech detected during this interaction. Check audio sensor functionality and ensure staff are actively engaging people on the floor.' : (da.nextRecommendedAction && da.nextRecommendedAction !== 'Not mentioned' ? da.nextRecommendedAction : 'Greet shoppers warmly, actively discover preference, and highlight trade-in incentives.')),
+      score: sc.overallScore != null ? sc.overallScore : (salesOutcome === 'Won' ? 4 : salesOutcome === 'Pending' ? 3 : salesOutcome === 'Lost' ? 2 : 3),
+    };
+  }
+
+  /**
+   * Retrieves an existing saved report for a date and store scope WITHOUT generating a new one
+   * @param {Object} params - { date, store, salesperson }
+   * @param {Object} user - Authenticated user context
+   * @returns {Promise<Object>} { success: true, hasReport: boolean, isStale: boolean, report: Object|null }
+   */
+  async getSavedDailyReport(params = {}, user = null) {
     const range = this.resolveDateRange(params);
+    const storeCode = (user && user.role === 'sales_manager' && user.storeCode) ? user.storeCode : (params.store || 'all');
+    const salesperson = params.salesperson || 'all';
+
+    const reportKey = `${range.date}:${storeCode}:${salesperson}`;
+
+    const savedReport = await DailyReport.findOne({ reportKey }).lean();
+
+    if (!savedReport) {
+      return {
+        success: true,
+        hasReport: false,
+        report: null,
+        date: range.date,
+        dateLabel: range.dateLabel,
+        storeCode,
+        businessTimezone: range.businessTimezone,
+        reportingDateRule: range.reportingDateRule,
+        message: `No analysis has been generated for ${range.dateLabel}. Click 'AI Analysis' to evaluate conversations.`,
+      };
+    }
+
+    // Check data freshness: Has the underlying conversation count or state changed?
+    const filter = this.buildFilter(range, params, user);
+    const currentSessions = await Session.find(filter).select('sessionId status verifiedSale verifiedRevenue dealAnalysis transcripts').lean();
+
+    // Deduplicate current sessions by sessionId
+    const uniqueCurrent = Array.from(new Map(currentSessions.map((s) => [s.sessionId, s])).values());
+    const currentHash = this.computeConversationsHash(uniqueCurrent);
+
+    const isStale = savedReport.conversationsHash !== currentHash || (savedReport.conversationIds || []).length !== uniqueCurrent.length;
+    const freshnessNote = isStale
+      ? `New conversations or sales recorded since report generation (${uniqueCurrent.length} current vs ${savedReport.conversationIds?.length || 0} in report). Click Update Analysis to refresh.`
+      : 'Report is fully synchronized with store records.';
+
+    return {
+      success: true,
+      hasReport: true,
+      isStale,
+      freshnessNote,
+      reportKey: savedReport.reportKey,
+      dateLabel: savedReport.date,
+      date: savedReport.date,
+      storeCode: savedReport.storeCode,
+      storeName: savedReport.storeName,
+      salesperson: savedReport.salesperson,
+      businessTimezone: savedReport.businessTimezone || range.businessTimezone,
+      reportingDateRule: range.reportingDateRule,
+      metrics: savedReport.metrics || {},
+      dailyTrends: savedReport.dailyTrends || [],
+      aiSummary: savedReport.aiSummary || {},
+      conversations: savedReport.conversations || [],
+      dataLimitations: savedReport.dataLimitations || [],
+      lastRefreshedAt: savedReport.lastRefreshedAt,
+      conversationIds: savedReport.conversationIds || [],
+      conversationsCount: (savedReport.conversationIds || []).length,
+      currentDbConversationsCount: uniqueCurrent.length,
+      report: savedReport,
+    };
+  }
+
+  /**
+   * Generates or updates a Daily Report for a date and store scope.
+   * Deterministically calculates all KPIs from authoritative records, runs grounded AI synthesis,
+   * updates the existing report document in MongoDB (upsert), and returns the synchronized report.
+   * @param {Object} params - { date, store, salesperson, refresh }
+   * @param {Object} user - Authenticated user context
+   * @returns {Promise<Object>} Completed synchronized report
+   */
+  async generateOrUpdateDailyReport(params = {}, user = null) {
+    const range = this.resolveDateRange(params);
+    const storeCode = (user && user.role === 'sales_manager' && user.storeCode) ? user.storeCode : (params.store || 'all');
+    const salesperson = params.salesperson || 'all';
+    const storeName = storeCode === 'all' ? 'All Retail Branches' : storeCode;
+
     const filter = this.buildFilter(range, params, user);
     const sortOrder = params.sort === 'oldest' ? { startedAt: 1 } : { startedAt: -1 };
 
-    // Fetch matching completed sessions
-    const sessions = await Session.find(filter).sort(sortOrder).limit(300);
+    // Fetch matching completed sessions from MongoDB
+    const rawSessions = await Session.find(filter).sort(sortOrder).limit(300);
 
-    // Auto-analyze any unanalyzed completed sessions (reuses existing analyses without re-calling analyzed ones)
+    // Deduplicate strictly by sessionId (each conversation counted exactly once)
+    const sessionMap = new Map();
+    for (const s of rawSessions) {
+      if (s.sessionId && !sessionMap.has(s.sessionId)) {
+        sessionMap.set(s.sessionId, s);
+      }
+    }
+    const sessions = Array.from(sessionMap.values());
+
+    // Auto-analyze any unanalyzed completed sessions that have transcripts
     const pendingSessions = sessions.filter(
       (s) => (!s.dealAnalysis || s.dealAnalysis.analysisStatus === 'pending') && (s.transcripts?.length || 0) > 0
     );
@@ -401,67 +779,19 @@ Rules:
       );
     }
 
-    // Calculate daily summary and sales analytics strictly from database
-    const totalCompleted = sessions.length;
-    let completedAnalysisCount = 0;
-    let pendingAnalysisCount = 0;
-    let failedAnalysisCount = 0;
+    // Deterministic metrics calculation
+    const { metrics, dataLimitations } = await this.calculateAuthoritativeMetrics(sessions, { storeCode });
 
-    let wonCount = 0;
-    let lostCount = 0;
-    let pendingCount = 0;
-    let inconclusiveCount = 0;
-    let verifiedSalesCount = 0;
-    let verifiedRevenueTotal = 0;
-    let hasVerifiedRevenue = false;
-    let insufficientEvidenceCount = 0;
+    // Format all individual conversation reports
+    const formattedConversations = sessions.map((s) => this.formatConversationReport(s));
 
+    // Daily trends map
     const dailyTrendsMap = new Map();
-
-    const formattedConversations = sessions.map((s) => {
-      const da = s.dealAnalysis || {};
-      const sc = s.scorecard || {};
-
-      // Map outcome
-      let salesOutcome = da.salesOutcome;
-      if (!salesOutcome) {
-        const raw = da.conversationOutcome || s.analytics?.dealOutcome;
-        if (raw === 'Sale Confirmed' || raw === 'won') salesOutcome = 'Won';
-        else if (raw === 'Not Converted' || raw === 'lost') salesOutcome = 'Lost';
-        else if (raw === 'Follow-up Required' || raw === 'in_negotiation') salesOutcome = 'Pending';
-        else salesOutcome = 'Inconclusive';
-      }
-
-      if (salesOutcome === 'Won') wonCount++;
-      else if (salesOutcome === 'Lost') lostCount++;
-      else if (salesOutcome === 'Pending') pendingCount++;
-      else inconclusiveCount++;
-
-      // Analysis status
-      const aStatus = da.analysisStatus || 'completed';
-      if (aStatus === 'completed') completedAnalysisCount++;
-      else if (aStatus === 'pending' || aStatus === 'analyzing') pendingAnalysisCount++;
-      else if (aStatus === 'failed') failedAnalysisCount++;
-
-      // Verified sales tracking
-      const isSaleVerified = Boolean(s.verifiedSale || da.isSaleVerified);
-      if (isSaleVerified) {
-        verifiedSalesCount++;
-        if (typeof s.verifiedRevenue === 'number') {
-          verifiedRevenueTotal += s.verifiedRevenue;
-          hasVerifiedRevenue = true;
-        }
-      }
-
-      if (salesOutcome === 'Inconclusive' || (s.transcripts?.length || 0) < 2) {
-        insufficientEvidenceCount++;
-      }
-
-      // Group date trends
-      const dateKey = s.startedAt ? new Date(s.startedAt).toISOString().slice(0, 10) : range.dateLabel;
-      if (!dailyTrendsMap.has(dateKey)) {
-        dailyTrendsMap.set(dateKey, {
-          date: dateKey,
+    formattedConversations.forEach((conv) => {
+      const dKey = conv.date || range.date;
+      if (!dailyTrendsMap.has(dKey)) {
+        dailyTrendsMap.set(dKey, {
+          date: dKey,
           total: 0,
           won: 0,
           lost: 0,
@@ -470,210 +800,103 @@ Rules:
           verifiedSales: 0,
         });
       }
-      const dt = dailyTrendsMap.get(dateKey);
+      const dt = dailyTrendsMap.get(dKey);
       dt.total++;
-      if (salesOutcome === 'Won') dt.won++;
-      else if (salesOutcome === 'Lost') dt.lost++;
-      else if (salesOutcome === 'Pending') dt.pending++;
+      if (conv.salesOutcome === 'Won') dt.won++;
+      else if (conv.salesOutcome === 'Lost') dt.lost++;
+      else if (conv.salesOutcome === 'Pending') dt.pending++;
       else dt.inconclusive++;
-      if (isSaleVerified) dt.verifiedSales++;
-
-      // Complete English transcript formatted into paragraphs
-      const transcripts = Array.isArray(s.transcripts) ? s.transcripts : [];
-      const englishTranscripts = transcripts.map((t) => ({
-        timestamp: t.timestamp,
-        speaker: t.speaker === 'sales_rep' ? 'Sales Specialist' : 'Customer',
-        text: t.englishText || t.text || '',
-        originalText: t.originalText || t.text || '',
-        isTranslated: Boolean(t.isTranslated),
-        sourceLanguage: t.sourceLanguage || 'en',
-      }));
-
-      // Return all 13 required individual conversation report fields
-      return {
-        // 1. Conversation ID, date, times, duration
-        conversationId: s.sessionId || s._id,
-        sessionId: s.sessionId,
-        date: s.startedAt ? new Date(s.startedAt).toISOString().slice(0, 10) : 'N/A',
-        startedAt: s.startedAt,
-        endedAt: s.endedAt,
-        durationSeconds: s.durationSeconds || 0,
-        durationFormatted: s.durationSeconds ? `${Math.floor(s.durationSeconds / 60)}m ${s.durationSeconds % 60}s` : '0s',
-        // 2. Store and salesperson
-        storeCode: s.storeCode,
-        storeName: s.storeName,
-        salesperson: s.salesRep || 'Sales Specialist',
-        terminal: s.deviceId || 'Counter 01',
-        // 3. Complete English transcript
-        transcripts: englishTranscripts,
-        transcriptCount: englishTranscripts.length,
-        // 4. Executive summary
-        executiveSummary: da.summary || 'Customer engaged in counter consultation regarding Apple retail products.',
-        // 5. Customer needs, intent, preferences, questions
-        customerRequirements: da.customerRequirements || 'Not mentioned',
-        customerBuyingIntent: da.customerBuyingIntent || 'Unclear',
-        customerQuestions: da.customerQuestions || [],
-        // 6. Products or services discussed
-        productsDiscussed: da.productsDiscussed || [],
-        budgetAndPrice: da.budgetAndPrice || 'Not mentioned',
-        // 7. Sales outcome
-        salesOutcome,
-        conversationOutcome: da.conversationOutcome || salesOutcome,
-        // 8. Evidence supporting outcome
-        outcomeEvidence: da.outcomeExplanation || (
-          salesOutcome === 'Won'
-            ? 'Customer confirmed purchase transaction with payment or explicit agreement to buy.'
-            : salesOutcome === 'Lost'
-            ? 'Customer rejected offer or cited prohibitive constraints without buying.'
-            : salesOutcome === 'Pending'
-            ? 'Customer expressed purchase intent but requested time or scheduled follow-up consultation.'
-            : 'Dialogue concluded without recorded transaction or closure statement.'
-        ),
-        // 9. Whether sale or transaction is actually verified
-        isSaleVerified,
-        verifiedStatusLabel: isSaleVerified ? 'Verified Sale (Transaction Confirmed)' : 'Unverified (Verbal Agreement / Discussion Only)',
-        verifiedRevenue: s.verifiedRevenue != null ? s.verifiedRevenue : null,
-        transactionId: s.transactionId || null,
-        // 10. Customer objections, concerns, unresolved questions
-        customerObjections: da.customerObjections || [],
-        salespersonResponse: da.salespersonResponse || 'Provided consultative product overview.',
-        // 11. Salesperson performance & missed opportunities
-        salespersonPerformance: {
-          overallScore: sc.overallScore != null ? sc.overallScore : null,
-          strengths: sc.coachingFeedback?.handledWell || ['Courteous counter engagement'],
-          areasToImprove: sc.coachingFeedback?.areasToImprove || ['Clarify budget and trade-in earlier in conversation'],
-          missedOpportunity: sc.coachingFeedback?.missedOpportunity || 'None identified in dialogue',
-          evidenceQuote: sc.coachingFeedback?.evidenceQuote || '',
-        },
-        // 12. Recommended follow-up actions and next steps
-        nextRecommendedAction: da.nextRecommendedAction || 'Follow up with customer within 24 hours.',
-        // 13. Analysis status and limitations
-        analysisStatus: aStatus,
-        limitations: 'Single-channel counter audio. Diarization speaker roles estimated from retail conversation cues.',
-        // 14. Audio playback, sentiment, word count & coaching note
-        hasAudio: Boolean(s.audioUrl || s.audioFileName),
-        audioUrl: s.audioUrl || (s.audioFileName ? `/uploads/${s.audioFileName}` : `/api/sessions/${s.sessionId}/audio`),
-        audioFileName: s.audioFileName || null,
-        sentiment: (s.scorecard?.sentiment || da.sentiment || (salesOutcome === 'Won' ? 'POSITIVE' : salesOutcome === 'Lost' ? 'NEGATIVE' : 'NEUTRAL')).toUpperCase(),
-        wordCount: englishTranscripts.reduce((acc, t) => acc + (t.text || '').trim().split(/\s+/).filter(Boolean).length, 0),
-        coachingNote: sc.coachingFeedback?.actionableCoaching || (englishTranscripts.length === 0 ? 'No speech detected during this interaction. Check audio sensor functionality and ensure staff are actively engaging people on the floor.' : (da.nextRecommendedAction && da.nextRecommendedAction !== 'Not mentioned' ? da.nextRecommendedAction : 'Greet shoppers warmly, actively discover preference, and highlight trade-in incentives.')),
-        score: sc.overallScore != null ? sc.overallScore : (salesOutcome === 'Won' ? 4 : salesOutcome === 'Pending' ? 3 : salesOutcome === 'Lost' ? 2 : 3),
-      };
+      if (conv.isSaleVerified) dt.verifiedSales++;
     });
-
-    const conversionRate = totalCompleted > 0 ? Math.round((wonCount / totalCompleted) * 100) : 0;
-    const followUpRate = totalCompleted > 0 ? Math.round((pendingCount / totalCompleted) * 100) : 0;
-    const avgTicket = verifiedSalesCount > 0 && verifiedRevenueTotal > 0 ? Math.round(verifiedRevenueTotal / verifiedSalesCount) : null;
-    const activityLevel = (totalCompleted >= 6 || verifiedSalesCount >= 2) ? 'Active' : (totalCompleted >= 2 || verifiedSalesCount >= 1) ? 'Moderate' : 'Quiet';
-    const headline = hasVerifiedRevenue
-      ? `${activityLevel} day, $${verifiedRevenueTotal} in sales, ${totalCompleted} conversation${totalCompleted === 1 ? '' : 's'}`
-      : `${activityLevel} day — no sales, ${totalCompleted} conversation${totalCompleted === 1 ? '' : 's'}`;
-    const headlineExplanation = totalCompleted === 0
-      ? 'Quiet day — no conversations recorded and no verified sales.'
-      : `${activityLevel} day with ${totalCompleted} recorded customer consultation${totalCompleted > 1 ? 's' : ''} across store counters. ${verifiedSalesCount > 0 ? `Confirmed ${verifiedSalesCount} verified sales transaction${verifiedSalesCount > 1 ? 's' : ''} generating $${verifiedRevenueTotal}.` : 'No confirmed customer transactions recorded for this business date.'}`;
-
-    const metrics = {
-      totalCompleted,
-      completedAnalysisCount,
-      pendingAnalysisCount,
-      failedAnalysisCount,
-      wonCount,
-      lostCount,
-      pendingCount,
-      inconclusiveCount,
-      verifiedSalesCount,
-      verifiedRevenue: hasVerifiedRevenue ? verifiedRevenueTotal : null,
-      verifiedRevenueDisplay: hasVerifiedRevenue ? `$${verifiedRevenueTotal.toLocaleString()}` : '$0',
-      avgTicket,
-      avgTicketDisplay: avgTicket != null ? `$${avgTicket}` : 'N/A',
-      missedRevenue: lostCount > 0 ? lostCount * 25 : 0,
-      missedRevenueDisplay: lostCount > 0 ? `$${lostCount * 25}` : '$0',
-      lowStockCount: 0,
-      lowStockDisplay: '0',
-      activityLevel,
-      headline,
-      headlineExplanation,
-      insufficientEvidenceCount,
-      conversionRate,
-      followUpRate,
-    };
-
     const dailyTrends = Array.from(dailyTrendsMap.values()).sort((a, b) => a.date.localeCompare(b.date));
 
-    // Daily-level AI summary (check DailyReport cache first to avoid re-generating when underlying data is unchanged)
-    const reportKey = `${range.dateLabel}:${params.store || 'all'}:${params.salesperson || 'all'}:${params.sort || 'newest'}`;
+    // AI Daily Summary: Grounded in underlying transcripts and deal analyses
+    const aiSummary = await this.generateDailyAiSummary(sessions, range.dateLabel);
+
+    const reportKey = `${range.date}:${storeCode}:${salesperson}`;
     const conversationsHash = this.computeConversationsHash(sessions);
+    const now = new Date();
 
-    let aiSummary = null;
-    let cachedReport = null;
-
-    if (!params.refresh) {
-      try {
-        cachedReport = await DailyReport.findOne({ reportKey });
-        if (cachedReport && cachedReport.conversationsHash === conversationsHash && cachedReport.aiSummary) {
-          aiSummary = cachedReport.aiSummary;
-        }
-      } catch (err) {
-        // Continue to fresh summary
-      }
-    }
-
-    if (!aiSummary) {
-      aiSummary = await this.generateDailyAiSummary(sessions, range.dateLabel);
-
-      // Persist to MongoDB DailyReport collection
-      try {
-        await DailyReport.findOneAndUpdate(
-          { reportKey },
-          {
-            reportKey,
-            reportType: range.isSingleDay ? 'single_day' : 'custom_range',
-            date: range.dateLabel,
-            startDate: range.startDate,
-            endDate: range.endDate,
-            storeCode: params.store || 'all',
-            salesperson: params.salesperson || 'all',
-            businessTimezone: range.businessTimezone,
-            metrics,
-            dailyTrends,
-            aiSummary,
-            conversationIds: sessions.map((s) => s.sessionId),
-            conversationsHash,
-            lastRefreshedAt: new Date(),
-          },
-          { upsert: true, new: true }
-        );
-      } catch (saveErr) {
-        console.warn('[Daily Report] Cache save note:', saveErr.message);
-      }
-    }
-
-    return {
-      success: true,
+    // Persist / Upsert in MongoDB DailyReport collection
+    const reportDoc = {
       reportKey,
-      dateLabel: range.dateLabel,
+      reportType: range.isSingleDay ? 'single_day' : 'custom_range',
+      date: range.date,
       startDate: range.startDate,
       endDate: range.endDate,
-      isSingleDay: range.isSingleDay,
-      daysCount: range.daysCount,
+      storeCode,
+      storeName,
+      salesperson,
       businessTimezone: range.businessTimezone,
-      activeFilters: {
-        filterType: params.filterType || 'today',
-        store: params.store || 'all',
-        salesperson: params.salesperson || 'all',
-        outcome: params.outcome || 'all',
-        sort: params.sort || 'newest',
-      },
       metrics,
       dailyTrends,
       aiSummary,
       conversations: formattedConversations,
-      generatedAt: new Date().toISOString(),
+      dataLimitations,
+      activeFilters: {
+        filterType: params.filterType || 'single',
+        store: storeCode,
+        salesperson,
+        outcome: params.outcome || 'all',
+        sort: params.sort || 'newest',
+      },
+      conversationIds: sessions.map((s) => s.sessionId),
+      conversationsHash,
+      lastRefreshedAt: now,
+    };
+
+    const savedDoc = await DailyReport.findOneAndUpdate(
+      { reportKey },
+      reportDoc,
+      { upsert: true, new: true }
+    );
+
+    return {
+      success: true,
+      hasReport: true,
+      isStale: false,
+      freshnessNote: 'Report is fully synchronized with current store records.',
+      reportKey,
+      dateLabel: range.dateLabel,
+      date: range.date,
+      storeCode,
+      storeName,
+      salesperson,
+      businessTimezone: range.businessTimezone,
+      reportingDateRule: range.reportingDateRule,
+      metrics,
+      dailyTrends,
+      aiSummary,
+      conversations: formattedConversations,
+      dataLimitations,
+      lastRefreshedAt: now,
+      conversationIds: sessions.map((s) => s.sessionId),
+      conversationsCount: sessions.length,
+      currentDbConversationsCount: sessions.length,
+      report: savedDoc,
     };
   }
 
   /**
-   * Generates a multi-page, publication-quality executive PDF adhering strictly to the 8-point structure
+   * Compatibility wrapper for getDailyReport
+   */
+  async getDailyReport(params = {}, user = null) {
+    if (params.refresh === true || params.generate === 'true') {
+      return this.generateOrUpdateDailyReport(params, user);
+    }
+    if (params.onlySaved === true) {
+      return this.getSavedDailyReport(params, user);
+    }
+    // Check if saved exists; if not, generate (retaining backward compatibility for legacy callers)
+    const saved = await this.getSavedDailyReport(params, user);
+    if (saved && saved.hasReport) {
+      return saved;
+    }
+    return this.generateOrUpdateDailyReport(params, user);
+  }
+
+  /**
+   * Generates a multi-page, publication-quality executive PDF adhering to the 8-point structure
    */
   async generateDailyReportPdf(reportData, currentUser = null) {
     const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
@@ -694,18 +917,23 @@ Rules:
 
     const {
       dateLabel,
-      businessTimezone,
+      date,
+      businessTimezone = DEFAULT_BUSINESS_TIMEZONE,
+      reportingDateRule,
       activeFilters = {},
       metrics = {},
       dailyTrends = [],
       aiSummary = {},
       conversations = [],
+      dataLimitations = [],
+      lastRefreshedAt,
     } = reportData;
 
+    const displayDate = dateLabel || date || 'Selected Date';
     const pageWidth = doc.internal.pageSize.getWidth();
     let y = 14;
 
-    // Helper: Header block (Section 1 & 2)
+    // Header Block
     const drawHeader = () => {
       doc.setFillColor(...COLORS.primary);
       doc.roundedRect(14, y, 10, 10, 2, 2, 'F');
@@ -722,11 +950,11 @@ Rules:
       doc.setTextColor(...COLORS.slateMuted);
       doc.setFontSize(7.5);
       doc.setFont('helvetica', 'normal');
-      doc.text('RETAIL INTELLIGENCE & DAILY REPORT', 27, y + 9);
+      doc.text('RETAIL INTELLIGENCE & AUDITABLE DAILY REPORT', 27, y + 9);
 
-      // Metadata card
-      const metaW = 76;
-      const metaH = 22;
+      // Metadata Card
+      const metaW = 82;
+      const metaH = 24;
       const metaX = pageWidth - 14 - metaW;
       doc.setFillColor(...COLORS.slateLight);
       doc.setDrawColor(...COLORS.slateBorder);
@@ -737,29 +965,30 @@ Rules:
       doc.setTextColor(...COLORS.slateMuted);
       doc.setFont('helvetica', 'bold');
       doc.text('TIMEZONE:', metaX + 4, y + 5);
-      doc.text('PERIOD:', metaX + 4, y + 10);
+      doc.text('REPORT DATE:', metaX + 4, y + 10);
       doc.text('STORE / REP:', metaX + 4, y + 15);
-      doc.text('GENERATED:', metaX + 4, y + 20);
+      doc.text('SYNCHRONIZED:', metaX + 4, y + 20);
 
       doc.setFont('helvetica', 'normal');
       doc.setTextColor(...COLORS.primary);
-      doc.text(String(businessTimezone), metaX + 26, y + 5);
-      doc.text(String(dateLabel).slice(0, 24), metaX + 26, y + 10);
+      doc.text(String(businessTimezone), metaX + 28, y + 5);
+      doc.text(String(displayDate).slice(0, 24), metaX + 28, y + 10);
       const storeRepStr = `${activeFilters.store || 'All'} / ${activeFilters.salesperson || 'All'}`;
-      doc.text(storeRepStr.slice(0, 24), metaX + 26, y + 15);
-      doc.text(new Date().toLocaleString('en-US', { timeZone: 'America/New_York' }), metaX + 26, y + 20);
+      doc.text(storeRepStr.slice(0, 24), metaX + 28, y + 15);
+      const refreshStr = lastRefreshedAt ? new Date(lastRefreshedAt).toLocaleString('en-US', { timeZone: businessTimezone }) : 'Real-time';
+      doc.text(refreshStr.slice(0, 24), metaX + 28, y + 20);
 
-      y += 16;
+      y += 18;
       doc.setFontSize(15);
       doc.setFont('helvetica', 'bold');
       doc.setTextColor(...COLORS.primary);
-      doc.text(`Daily Sales Intelligence Report — ${dateLabel}`, 14, y);
+      doc.text(`Daily Sales Intelligence Report — ${displayDate}`, 14, y);
 
       y += 5.5;
       doc.setFontSize(8);
       doc.setFont('helvetica', 'normal');
       doc.setTextColor(...COLORS.slateMuted);
-      doc.text(`Audited retail conversation reports, verified sales metrics, daily AI summary, and complete transcripts.`, 14, y);
+      doc.text(reportingDateRule || `Conversations attributed by startedAt in ${businessTimezone} business time.`, 14, y);
 
       y += 7;
       doc.setDrawColor(...COLORS.slateBorder);
@@ -770,77 +999,63 @@ Rules:
 
     drawHeader();
 
-    // SECTION 3 & 4: Overall Sales Analytics and Verified Metrics
+    // Section 1: Deterministic Sales Metrics
     doc.setFontSize(10);
     doc.setFont('helvetica', 'bold');
     doc.setTextColor(...COLORS.primary);
-    doc.text('1. Daily Sales Summary & Verified Metrics', 14, y);
+    doc.text('1. Deterministic Business Metrics (Audited Records)', 14, y);
     y += 4;
 
     const summaryCards = [
-      ['Total Completed', String(metrics.totalCompleted || 0), 'AI Analysis Status', `Completed: ${metrics.completedAnalysisCount || 0} | Pending: ${metrics.pendingAnalysisCount || 0}`],
-      ['Won (Confirmed)', String(metrics.wonCount || 0), 'Lost (Not Converted)', String(metrics.lostCount || 0)],
-      ['Pending (Follow-up)', String(metrics.pendingCount || 0), 'Inconclusive Outcome', String(metrics.inconclusiveCount || 0)],
-      ['Verified Sales Records', String(metrics.verifiedSalesCount || 0), 'Verified Total Revenue', metrics.verifiedRevenueDisplay || 'Unavailable (Not verified)'],
+      ['Total Completed Conversations', String(metrics.totalCompleted || 0), 'Verified Completed Sales', String(metrics.verifiedSalesCount || 0)],
+      ['Verified Total Revenue', metrics.verifiedRevenueDisplay || '$0', 'Average Ticket (per sale)', metrics.avgTicketDisplay || 'N/A'],
+      ['Unconverted Consultations', metrics.missedOpportunitiesDisplay || '0', 'Low-Stock Products Alert', metrics.lowStockDisplay || 'N/A'],
+      ['Total Spoken Words Audited', String(metrics.totalWordCount || 0), 'Total Audio Duration', `${Math.floor((metrics.totalDurationSeconds || 0) / 60)}m ${(metrics.totalDurationSeconds || 0) % 60}s`],
     ];
 
     autoTable(doc, {
       startY: y,
-      head: [['Metric', 'Value', 'Metric', 'Value']],
+      head: [['Audited Metric', 'Value', 'Audited Metric', 'Value']],
       body: summaryCards,
       theme: 'grid',
       styles: { fontSize: 7.5, cellPadding: 2.6, textColor: COLORS.slateText, lineColor: COLORS.slateBorder, lineWidth: 0.2 },
       headStyles: { fillColor: COLORS.primary, textColor: COLORS.white, fontStyle: 'bold' },
       columnStyles: {
-        0: { cellWidth: 42, fontStyle: 'bold', fillColor: COLORS.slateLight },
-        1: { cellWidth: 48, fontStyle: 'bold', textColor: COLORS.secondary },
-        2: { cellWidth: 42, fontStyle: 'bold', fillColor: COLORS.slateLight },
-        3: { cellWidth: 50 },
+        0: { cellWidth: 46, fontStyle: 'bold', fillColor: COLORS.slateLight },
+        1: { cellWidth: 44, fontStyle: 'bold', textColor: COLORS.secondary },
+        2: { cellWidth: 46, fontStyle: 'bold', fillColor: COLORS.slateLight },
+        3: { cellWidth: 46 },
       },
       margin: { left: 14, right: 14 },
     });
     y = doc.lastAutoTable.finalY + 6;
 
-    // Date-wise trends table for multi-day range
-    if (dailyTrends.length > 1) {
-      doc.setFontSize(9);
+    // Section 2: Data Limitations & Boundary Explanations
+    if (dataLimitations && dataLimitations.length > 0) {
+      doc.setFontSize(8.5);
       doc.setFont('helvetica', 'bold');
-      doc.setTextColor(...COLORS.primary);
-      doc.text('Date-Wise Summary Breakdown', 14, y);
-      y += 3;
-
-      const trendRows = dailyTrends.map((t) => [
-        t.date,
-        String(t.total),
-        String(t.won),
-        String(t.lost),
-        String(t.pending),
-        String(t.inconclusive),
-        String(t.verifiedSales),
-      ]);
-
-      autoTable(doc, {
-        startY: y,
-        head: [['Date', 'Total', 'Won', 'Lost', 'Pending', 'Inconclusive', 'Verified Sales']],
-        body: trendRows,
-        theme: 'grid',
-        styles: { fontSize: 7, cellPadding: 2.2, textColor: COLORS.slateText, lineColor: COLORS.slateBorder, lineWidth: 0.2 },
-        headStyles: { fillColor: COLORS.primary, textColor: COLORS.white, fontStyle: 'bold' },
-        margin: { left: 14, right: 14 },
+      doc.setTextColor(...COLORS.slateMuted);
+      doc.text('Data Governance & Audit Limitations:', 14, y);
+      y += 3.5;
+      doc.setFontSize(7);
+      doc.setFont('helvetica', 'normal');
+      dataLimitations.forEach((lim) => {
+        doc.text(`• ${lim}`, 16, y);
+        y += 3.5;
       });
-      y = doc.lastAutoTable.finalY + 6;
+      y += 3;
     }
 
-    // SECTION 5: Daily-Level AI Analysis & Recommendations
-    if (y > 220) { doc.addPage(); y = 16; }
+    // Section 3: Daily-Level AI Analysis & Recommendations
+    if (y > 215) { doc.addPage(); y = 16; }
     doc.setFontSize(10);
     doc.setFont('helvetica', 'bold');
     doc.setTextColor(...COLORS.primary);
-    doc.text('2. Daily-Level AI Analysis & Recommendations', 14, y);
+    doc.text('2. Daily-Level AI Synthesis & Recommendations', 14, y);
     y += 4;
 
     const aiRows = [
-      ['Common Customer Needs & Purchase Intent', aiSummary.commonCustomerNeeds || 'N/A'],
+      ['Common Customer Needs & Intent', aiSummary.commonCustomerNeeds || 'N/A'],
       ['Frequently Discussed Products', (aiSummary.frequentlyDiscussedProducts || []).join('; ') || 'None recorded'],
       ['Recurring Customer Objections & Barriers', (aiSummary.recurringObjections || []).join('; ') || 'None identified'],
       ['Sales Outcomes & Performance Synthesis', aiSummary.salesOutcomesSummary || 'N/A'],
@@ -865,7 +1080,7 @@ Rules:
     });
     y = doc.lastAutoTable.finalY + 8;
 
-    // SECTION 6 & 7: Individual Conversation Analyses & Complete English Transcripts
+    // Section 4: Individual Conversation Analyses & Transcripts
     doc.addPage();
     y = 16;
     doc.setFontSize(11);
@@ -876,7 +1091,7 @@ Rules:
     doc.setFontSize(7.5);
     doc.setFont('helvetica', 'normal');
     doc.setTextColor(...COLORS.slateMuted);
-    doc.text(`Every eligible conversation in the selected period is detailed below with all 13 audit dimensions and verbatim transcripts.`, 14, y);
+    doc.text(`Every eligible conversation in the selected period is detailed below with all audit dimensions and verbatim transcripts.`, 14, y);
     y += 6;
 
     if (conversations.length === 0) {
@@ -892,7 +1107,6 @@ Rules:
       conversations.forEach((conv, index) => {
         if (y > 220) { doc.addPage(); y = 16; }
 
-        // Conversation Section Banner
         doc.setFillColor(...COLORS.slateLight);
         doc.setDrawColor(...COLORS.secondary);
         doc.setLineWidth(0.6);
@@ -901,16 +1115,15 @@ Rules:
         doc.setFontSize(8.5);
         doc.setFont('helvetica', 'bold');
         doc.setTextColor(...COLORS.primary);
-        doc.text(`Conversation #${index + 1}: ${conv.sessionId} — ${conv.salesOutcome.toUpperCase()}`, 18, y + 5.5);
+        doc.text(`Conversation #${index + 1}: ${conv.sessionId} — ${(conv.salesOutcome || 'INCONCLUSIVE').toUpperCase()}`, 18, y + 5.5);
 
         doc.setFont('helvetica', 'normal');
         doc.setFontSize(7);
         doc.setTextColor(...COLORS.slateMuted);
-        doc.text(`${conv.storeName} • Rep: ${conv.salesperson} • ${conv.durationFormatted}`, pageWidth - 18, y + 5.5, { align: 'right' });
+        doc.text(`${conv.storeName || conv.storeCode} • Rep: ${conv.salesperson} • ${conv.durationFormatted}`, pageWidth - 18, y + 5.5, { align: 'right' });
 
         y += 11;
 
-        // Individual Conversation 13-Dimension Audit Table
         const convDetails = [
           ['Executive Summary', conv.executiveSummary],
           ['Customer Needs & Intent', `${conv.customerRequirements} (Intent: ${conv.customerBuyingIntent})`],
@@ -918,9 +1131,9 @@ Rules:
           ['Sales Outcome & Evidence', `Outcome: ${conv.salesOutcome} (${conv.conversationOutcome})\nEvidence: ${conv.outcomeEvidence}`],
           ['Verified Sale Status', `${conv.verifiedStatusLabel}${conv.verifiedRevenue != null ? ` | Verified Revenue: $${conv.verifiedRevenue}` : ''}`],
           ['Customer Objections & Response', `Objections: ${(conv.customerObjections || []).join(', ') || 'None'}\nSalesperson Response: ${conv.salespersonResponse}`],
-          ['Salesperson Performance', `Score: ${conv.salespersonPerformance.overallScore != null ? `${conv.salespersonPerformance.overallScore}/100` : 'Assessed'}\nStrengths: ${(conv.salespersonPerformance.strengths || []).join('; ')}\nImprovement: ${(conv.salespersonPerformance.areasToImprove || []).join('; ')}`],
+          ['Salesperson Performance', `Score: ${conv.salespersonPerformance?.overallScore != null ? `${conv.salespersonPerformance.overallScore}/100` : 'Assessed'}\nStrengths: ${(conv.salespersonPerformance?.strengths || []).join('; ')}\nImprovement: ${(conv.salespersonPerformance?.areasToImprove || []).join('; ')}`],
           ['Recommended Next Steps', conv.nextRecommendedAction],
-          ['Analysis Status & Limitations', `Status: ${conv.analysisStatus.toUpperCase()} | Diarization: ${conv.limitations}`],
+          ['Analysis Status & Limitations', `Status: ${(conv.analysisStatus || 'completed').toUpperCase()} | Diarization: ${conv.limitations}`],
         ];
 
         autoTable(doc, {
@@ -938,7 +1151,6 @@ Rules:
         });
         y = doc.lastAutoTable.finalY + 4;
 
-        // Complete English Transcript
         const transcriptLines = (conv.transcripts || []).map((t, tIdx) => {
           const time = t.timestamp ? new Date(t.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : `#${tIdx + 1}`;
           const transTag = t.isTranslated ? ' [Translated]' : '';
@@ -968,7 +1180,7 @@ Rules:
       });
     }
 
-    // SECTION 8: Page numbers & Confidentiality Footers
+    // Footers
     const totalPages = doc.internal.getNumberOfPages();
     for (let p = 1; p <= totalPages; p++) {
       doc.setPage(p);

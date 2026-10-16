@@ -100,6 +100,10 @@ const SessionSchema = new mongoose.Schema({
     type: String,
     default: null
   },
+  transactionStatus: {
+    type: String,
+    default: null
+  },
   transcripts: [TranscriptItemSchema],
   analytics: {
     dealOutcome: {
