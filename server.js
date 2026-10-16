@@ -125,6 +125,8 @@ async function initDatabase() {
     try {
       await authRoutes.seedDefaultUsers();
       await storeSyncService.ensureStoresInDatabase();
+      const dailyReportService = require('./services/dailyReportService');
+      await dailyReportService.ensureDefaultInventory();
     } catch (seedErr) {
       console.warn('Seeding note:', seedErr.message);
     }

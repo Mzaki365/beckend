@@ -677,8 +677,21 @@ Rules:
     const salesperson = params.salesperson || 'all';
 
     const reportKey = `${range.date}:${storeCode}:${salesperson}`;
+    const targetDate = range.date;
 
-    const savedReport = await DailyReport.findOne({ reportKey }).lean();
+    const query = {
+      $or: [
+        { reportKey },
+        { reportKey: `${reportKey}:newest` },
+        { date: targetDate, storeCode, salesperson },
+        { date: `Today (${targetDate})`, storeCode, salesperson },
+        { date: `Yesterday (${targetDate})`, storeCode, salesperson },
+      ],
+    };
+
+    const savedReport = await DailyReport.findOne(query)
+      .sort({ lastRefreshedAt: -1, updatedAt: -1, createdAt: -1 })
+      .lean();
 
     if (!savedReport) {
       return {
@@ -846,9 +859,16 @@ Rules:
     };
 
     const savedDoc = await DailyReport.findOneAndUpdate(
-      { reportKey },
+      {
+        $or: [
+          { reportKey },
+          { reportKey: `${reportKey}:newest` },
+          { date: range.date, storeCode, salesperson },
+          { date: `Today (${range.date})`, storeCode, salesperson },
+        ],
+      },
       reportDoc,
-      { upsert: true, new: true }
+      { upsert: true, returnDocument: 'after', setDefaultsOnInsert: true }
     );
 
     return {
@@ -1208,6 +1228,30 @@ Rules:
       strategicRecommendations: summary.actionableRecommendations || [],
       ...summary,
     };
+  }
+
+  async ensureDefaultInventory() {
+    try {
+      const count = await Inventory.countDocuments();
+      if (count === 0) {
+        const DEFAULT_INVENTORY = [
+          { productName: 'iPhone 16 Pro Max 256GB', sku: 'IP16PM-256-NT', category: 'iPhone', storeCode: 'STORE-01', currentStock: 12, lowStockThreshold: 5, unitPrice: 1199 },
+          { productName: 'iPhone 16 Pro 128GB Desert Titanium', sku: 'IP16P-128-DT', category: 'iPhone', storeCode: 'STORE-01', currentStock: 2, lowStockThreshold: 5, unitPrice: 999 },
+          { productName: 'iPhone 16 128GB Black', sku: 'IP16-128-BK', category: 'iPhone', storeCode: 'STORE-01', currentStock: 18, lowStockThreshold: 6, unitPrice: 799 },
+          { productName: 'AirPods Pro 2 (USB-C)', sku: 'APP2-USBC', category: 'Accessories', storeCode: 'STORE-01', currentStock: 3, lowStockThreshold: 8, unitPrice: 249 },
+          { productName: 'AppleCare+ 2-Year Coverage', sku: 'AC-IPHONE', category: 'Services', storeCode: 'STORE-01', currentStock: 999, lowStockThreshold: 10, unitPrice: 199 },
+          { productName: 'iPhone 16 Pro Max 256GB', sku: 'IP16PM-256-NT', category: 'iPhone', storeCode: 'STORE-02', currentStock: 15, lowStockThreshold: 5, unitPrice: 1199 },
+          { productName: 'iPhone 16 Pro 128GB Natural Titanium', sku: 'IP16P-128-NT', category: 'iPhone', storeCode: 'STORE-02', currentStock: 1, lowStockThreshold: 4, unitPrice: 999 },
+          { productName: 'AirPods Pro 2 (USB-C)', sku: 'APP2-USBC', category: 'Accessories', storeCode: 'STORE-02', currentStock: 14, lowStockThreshold: 8, unitPrice: 249 },
+          { productName: 'iPhone 16 Pro Max 512GB', sku: 'IP16PM-512-BK', category: 'iPhone', storeCode: 'STORE-03', currentStock: 6, lowStockThreshold: 3, unitPrice: 1399 },
+          { productName: 'iPhone 16 128GB Teal', sku: 'IP16-128-TL', category: 'iPhone', storeCode: 'STORE-03', currentStock: 2, lowStockThreshold: 5, unitPrice: 799 },
+        ];
+        await Inventory.insertMany(DEFAULT_INVENTORY);
+        console.log('📦 [Inventory] Initialized default store inventory catalog in MongoDB');
+      }
+    } catch (err) {
+      console.warn('[Inventory] Initialization note:', err.message);
+    }
   }
 }
 
