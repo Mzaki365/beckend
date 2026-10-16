@@ -207,7 +207,6 @@ function createStreamingSession({
                 // 1. REJECT UNSUPPORTED LANGUAGES (Hindi, Urdu, Devanagari, French, etc.)
                 // Per production requirements: Do NOT translate, do NOT emit, do NOT mix into final English transcript
                 if (langResolution.isUnsupported) {
-                  console.warn(`[STT Recognition] Segment dropped for session ${sessionId}: Detected unsupported language '${langResolution.detectedCode}' (${langResolution.reason}). Only English and Spanish speech are supported.`);
                   return;
                 }
 

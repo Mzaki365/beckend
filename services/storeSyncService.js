@@ -366,7 +366,6 @@ class StoreSyncService {
     const { translateToEnglish, resolveTranscriptLanguage } = require('./translationService');
     const langRes = resolveTranscriptLanguage(englishText, payload);
     if (langRes.isUnsupported) {
-      console.warn(`[Session Sync] Dropping unsupported language segment for ${sessionId}: ${langRes.detectedCode}`);
       return;
     }
 
@@ -516,7 +515,6 @@ class StoreSyncService {
           // Check if unsupported language (e.g. Hindi/Devanagari, Urdu, etc.)
           const langCheck = resolveTranscriptLanguage(rawCandidate, s);
           if (langCheck.isUnsupported) {
-            console.warn(`[Session Sync] Excluded unsupported segment from final record: "${rawCandidate}"`);
             continue;
           }
 
