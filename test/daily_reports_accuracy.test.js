@@ -388,13 +388,18 @@ describe('Daily Reports Accuracy & Calendar Management Overhaul', () => {
   });
 
   test('Test 10: Date boundaries, timezone handling, and store permissions', async () => {
-    // 1. Timezone boundary precision
+    // 1. Timezone boundary precision (Asia/Karachi business timezone)
     const bounds = dailyReportService.resolveDateRange({ date: '2026-11-10' });
-    assert.equal(bounds.businessTimezone, 'America/New_York');
+    assert.equal(bounds.businessTimezone, process.env.BUSINESS_TIMEZONE || 'Asia/Karachi');
     assert.ok(bounds.startDate instanceof Date);
     assert.ok(bounds.endDate instanceof Date);
     // Boundary span is exactly 24 hours (86,399,999 ms)
     assert.equal(bounds.endDate.getTime() - bounds.startDate.getTime(), 86399999);
+
+    // Also verify explicit timezone parameter override works correctly
+    const boundsNy = dailyReportService.resolveDateRange({ date: '2026-11-10', businessTimezone: 'America/New_York' });
+    assert.equal(boundsNy.businessTimezone, 'America/New_York');
+    assert.equal(boundsNy.endDate.getTime() - boundsNy.startDate.getTime(), 86399999);
 
     // 2. Store scoping permissions
     const managerUser = { role: 'sales_manager', storeCode: 'STR_MGR_01' };

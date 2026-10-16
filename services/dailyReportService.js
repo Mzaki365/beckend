@@ -23,7 +23,7 @@ const rawAutoTable = require('jspdf-autotable');
 const autoTable = typeof rawAutoTable === 'function' ? rawAutoTable : (rawAutoTable.default || rawAutoTable);
 
 // Canonical business timezone for Storelistener retail operations
-const DEFAULT_BUSINESS_TIMEZONE = 'America/New_York';
+const DEFAULT_BUSINESS_TIMEZONE = process.env.BUSINESS_TIMEZONE || 'Asia/Karachi';
 
 /**
  * Computes exact UTC boundaries for a given YYYY-MM-DD date in the business timezone
@@ -188,19 +188,27 @@ class DailyReportService {
       status: 'completed',
     };
 
+    const conditions = [];
+
     // Store isolation
     if (user && user.role === 'sales_manager' && user.storeCode) {
       filter.storeCode = user.storeCode;
     } else if (options.store && options.store !== 'all') {
       const storeSyncService = require('./storeSyncService');
       const cfg = storeSyncService.findStoreConfig(options.store);
-      filter.$or = [
-        { storeCode: cfg.code },
-        { storeCode: cfg.id },
-        { storeCode: options.store },
-        { storeId: options.store },
-        { storeId: cfg.id },
-      ];
+      const possibleCodes = Array.from(new Set([
+        cfg?.code,
+        cfg?.id,
+        options.store,
+        ...(cfg?.aliases || []),
+      ])).filter(Boolean);
+
+      conditions.push({
+        $or: [
+          { storeCode: { $in: possibleCodes } },
+          { storeId: { $in: possibleCodes } },
+        ],
+      });
     }
 
     // Salesperson filter
@@ -210,10 +218,22 @@ class DailyReportService {
 
     // Outcome filter
     if (options.outcome && options.outcome !== 'all') {
-      filter.$or = [
-        { 'dealAnalysis.salesOutcome': options.outcome },
-        { 'dealAnalysis.conversationOutcome': options.outcome },
-      ];
+      conditions.push({
+        $or: [
+          { 'dealAnalysis.salesOutcome': options.outcome },
+          { 'dealAnalysis.conversationOutcome': options.outcome },
+        ],
+      });
+    }
+
+    if (conditions.length === 1) {
+      if (conditions[0].$or) {
+        filter.$or = conditions[0].$or;
+      } else {
+        Object.assign(filter, conditions[0]);
+      }
+    } else if (conditions.length > 1) {
+      filter.$and = conditions;
     }
 
     return filter;
@@ -513,7 +533,7 @@ Rules:
 2. Ground all points strictly in the provided conversation data.
 3. Keep recommendations concise, concrete, and actionable for store managers.`;
 
-        const models = ['gemini-2.5-flash', 'gemini-flash-latest'];
+        const models = ['gemini-1.5-flash', 'gemini-2.0-flash', 'gemini-flash-latest'];
         for (const model of models) {
           try {
             const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
@@ -524,7 +544,7 @@ Rules:
                 contents: [{ parts: [{ text: prompt }] }],
                 generationConfig: { temperature: 0.0, responseMimeType: 'application/json' },
               }),
-              signal: AbortSignal.timeout(6000),
+              signal: AbortSignal.timeout(15000),
             });
             if (res.ok) {
               const data = await res.json();
@@ -858,16 +878,17 @@ Rules:
       lastRefreshedAt: now,
     };
 
+    // Clean up any conflicting legacy documents that have the same date/storeCode/salesperson but different reportKey
+    await DailyReport.deleteMany({
+      reportKey: { $ne: reportKey },
+      date: { $in: [range.date, `Today (${range.date})`, `Yesterday (${range.date})`] },
+      storeCode,
+      salesperson,
+    });
+
     const savedDoc = await DailyReport.findOneAndUpdate(
-      {
-        $or: [
-          { reportKey },
-          { reportKey: `${reportKey}:newest` },
-          { date: range.date, storeCode, salesperson },
-          { date: `Today (${range.date})`, storeCode, salesperson },
-        ],
-      },
-      reportDoc,
+      { reportKey },
+      { $set: reportDoc },
       { upsert: true, returnDocument: 'after', setDefaultsOnInsert: true }
     );
 
