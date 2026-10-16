@@ -12,7 +12,7 @@
  */
 
 const WebSocket = require('ws');
-const { translateToEnglish, isSpanishText, containsSpanishOrForeignWords } = require('./translationService');
+const { translateToEnglish, resolveTranscriptLanguage, isSpanishText, containsSpanishOrForeignWords } = require('./translationService');
 
 /**
  * Creates a real-time streaming STT session
@@ -195,36 +195,69 @@ function createStreamingSession({
                 const startKey = startTime !== null ? startTime.toFixed(2) : String(utteranceCount);
                 const segmentId = `seg_${sessionId}_${startKey}`;
 
-                // Spanish-to-English translation pipeline:
-                // 1. English speech: Keep in English exactly as recognized without rewriting or translation.
-                // 2. Spanish speech: Detect Spanish speech and translate to English before final transcript display.
-                // 3. Other languages: Do NOT translate. Retain recognized text verbatim without guessing.
-                // 4. Incomplete partials: Stream as recognized directly without translation thrashing or duplication.
+                // Provider metadata containing detected languages and per-word language tags
+                const providerMetadata = {
+                  languages: alternative.languages,
+                  words: alternative.words,
+                };
+
+                // Language Resolution: strictly distinguish English vs Spanish vs Unsupported
+                const langResolution = resolveTranscriptLanguage(transcriptText, providerMetadata);
+
+                // 1. REJECT UNSUPPORTED LANGUAGES (Hindi, Urdu, Devanagari, French, etc.)
+                // Per production requirements: Do NOT translate, do NOT emit, do NOT mix into final English transcript
+                if (langResolution.isUnsupported) {
+                  console.warn(`[STT Recognition] Segment dropped for session ${sessionId}: Detected unsupported language '${langResolution.detectedCode}' (${langResolution.reason}). Only English and Spanish speech are supported.`);
+                  return;
+                }
+
+                // 2. ENGLISH SPEECH
+                // Keep directly as recognized without rewriting or translation
                 let englishText = transcriptText;
                 let originalText = transcriptText;
                 let wasTranslated = false;
                 let sourceLanguage = 'en';
+                let translationFailed = false;
 
-                if (isFinal && isSpanishText(transcriptText)) {
+                // 3. SPANISH SPEECH
+                // Recognize Spanish speech and translate to English before final transcript display
+                if (langResolution.isSpanish) {
+                  sourceLanguage = 'es';
                   try {
-                    const translationResult = await translateToEnglish(transcriptText);
-                    if (translationResult && translationResult.wasTranslated) {
-                      englishText = translationResult.englishText || transcriptText;
+                    const translationResult = await translateToEnglish(transcriptText, providerMetadata);
+                    if (translationResult && translationResult.wasTranslated && translationResult.englishText) {
+                      englishText = translationResult.englishText;
                       originalText = translationResult.originalText || transcriptText;
                       wasTranslated = true;
-                      sourceLanguage = 'es';
+                    } else if (translationResult && translationResult.translationFailed) {
+                      translationFailed = true;
+                      console.warn(`[STT Translation] Translation failed for confirmed Spanish segment "${transcriptText}". Preserving diagnostic without fabricating English.`);
+                      // For final segments with translation failure, do not present raw Spanish as verified English
+                      if (isFinal) {
+                        englishText = null;
+                      }
                     }
                   } catch (transErr) {
-                    console.warn(`[STT Translation] Note for session ${sessionId}:`, transErr.message);
+                    translationFailed = true;
+                    console.warn(`[STT Translation] Error for session ${sessionId}:`, transErr.message);
+                    if (isFinal) {
+                      englishText = null;
+                    }
                   }
+                }
+
+                // If translation failed for Spanish final segment, do not fabricate English
+                if (translationFailed && isFinal && !englishText) {
+                  console.warn(`[STT Segment] Final Spanish segment could not be translated: "${transcriptText}". Skipping emission as English.`);
+                  return;
                 }
 
                 const segment = {
                   segmentId,
                   sessionId,
                   speaker: speakerLabel || 'Speaker',
-                  text: englishText,
-                  englishText,
+                  text: englishText || transcriptText,
+                  englishText: englishText || transcriptText,
                   originalText: wasTranslated ? originalText : transcriptText,
                   isTranslated: wasTranslated,
                   sourceLanguage,

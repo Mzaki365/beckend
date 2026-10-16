@@ -311,6 +311,21 @@ router.post('/sessions/:id/transcript', async (req, res) => {
 
     const { translateToEnglish } = require('../services/translationService');
     const tr = await translateToEnglish(text);
+
+    if (tr.isUnsupported) {
+      return res.status(400).json({
+        success: false,
+        error: tr.error || 'Detected language is unsupported. Final transcript admits English only.',
+      });
+    }
+
+    if (tr.translationFailed) {
+      return res.status(502).json({
+        success: false,
+        error: 'Translation service unavailable for Spanish speech. Raw Spanish not admitted as English.',
+      });
+    }
+
     const canonicalEnglish = tr.englishText || text;
 
     const realtimeAnalysis = analyzeRealtimeChunk(canonicalEnglish, session.transcripts);
@@ -497,7 +512,7 @@ router.post('/sessions/:id/live-transcribe', uploadMemory.single('audioChunk'), 
       return res.status(400).json({ success: false, error: 'No audio chunk provided' });
     }
 
-    const { language = 'ur', speaker = 'customer' } = req.body;
+    const { language = 'auto', speaker = 'customer' } = req.body;
     const session = await Session.findOne({ sessionId: req.params.id });
     if (!session) {
       return res.status(404).json({ success: false, error: 'Session not found' });
@@ -514,6 +529,25 @@ router.post('/sessions/:id/live-transcribe', uploadMemory.single('audioChunk'), 
     // Ensure translation to canonical English
     const { translateToEnglish } = require('../services/translationService');
     const tr = await translateToEnglish(transcribedText);
+
+    if (tr.isUnsupported) {
+      return res.json({
+        success: true,
+        text: '',
+        provider: sttResult.provider,
+        note: `Unsupported language (${tr.sourceLanguage}) excluded from English transcript`,
+      });
+    }
+
+    if (tr.translationFailed) {
+      return res.json({
+        success: true,
+        text: '',
+        provider: sttResult.provider,
+        note: 'Spanish translation unavailable. Raw Spanish not admitted as English.',
+      });
+    }
+
     const canonicalEnglish = tr.englishText || transcribedText;
 
     // Realtime AI Intelligence

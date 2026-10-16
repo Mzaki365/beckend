@@ -362,18 +362,29 @@ class StoreSyncService {
     let wasTranslated = !!payload.isTranslated;
     let detectedSourceLang = payload.sourceLanguage || 'en';
 
-    if (!wasTranslated) {
+    // Strictly validate language
+    const { translateToEnglish, resolveTranscriptLanguage } = require('./translationService');
+    const langRes = resolveTranscriptLanguage(englishText, payload);
+    if (langRes.isUnsupported) {
+      console.warn(`[Session Sync] Dropping unsupported language segment for ${sessionId}: ${langRes.detectedCode}`);
+      return;
+    }
+
+    if (!wasTranslated && langRes.isSpanish) {
       try {
-        const { translateToEnglish } = require('./translationService');
-        const translationResult = await translateToEnglish(text);
-        if (translationResult && translationResult.wasTranslated) {
+        const translationResult = await translateToEnglish(text, payload);
+        if (translationResult && translationResult.wasTranslated && translationResult.englishText) {
           englishText = translationResult.englishText;
           originalText = translationResult.originalText || text.trim();
           wasTranslated = true;
-          detectedSourceLang = translationResult.sourceLanguage || 'es';
+          detectedSourceLang = 'es';
+        } else if (translationResult && translationResult.translationFailed) {
+          console.warn(`[Session Sync] Translation failed for Spanish segment in session ${sessionId}. Not saving raw Spanish as English.`);
+          return;
         }
       } catch (trErr) {
         console.warn(`[Session Sync] Translation note for ${sessionId}:`, trErr.message);
+        return;
       }
     }
 
@@ -495,16 +506,54 @@ class StoreSyncService {
       }
 
       if (Array.isArray(bufferedSegments) && bufferedSegments.length > 0) {
-        updateData.transcripts = bufferedSegments.map((s) => ({
-          timestamp: s.timestamp ? new Date(s.timestamp) : new Date(),
-          speaker: (s.speaker || '').toLowerCase().includes('sales') ? 'sales_rep' : 'customer',
-          text: s.text || s.englishText || '',
-          englishText: s.englishText || s.text || '',
-          originalText: s.originalText || s.text || '',
-          sourceLanguage: s.sourceLanguage || 'en',
-          isTranslated: !!s.isTranslated,
-          confidence: s.confidence || 0.95,
-        }));
+        const { resolveTranscriptLanguage, translateToEnglish } = require('./translationService');
+        const normalizedTranscripts = [];
+
+        for (const s of bufferedSegments) {
+          const rawCandidate = String(s.englishText || s.text || '').trim();
+          if (!rawCandidate) continue;
+
+          // Check if unsupported language (e.g. Hindi/Devanagari, Urdu, etc.)
+          const langCheck = resolveTranscriptLanguage(rawCandidate, s);
+          if (langCheck.isUnsupported) {
+            console.warn(`[Session Sync] Excluded unsupported segment from final record: "${rawCandidate}"`);
+            continue;
+          }
+
+          let finalEnglish = rawCandidate;
+          let isTranslated = Boolean(s.isTranslated);
+          let sourceLang = s.sourceLanguage || (langCheck.isSpanish ? 'es' : 'en');
+
+          // If segment is Spanish and untranslated, translate now
+          if (langCheck.isSpanish && !isTranslated) {
+            try {
+              const tr = await translateToEnglish(rawCandidate, s);
+              if (tr && tr.wasTranslated && tr.englishText) {
+                finalEnglish = tr.englishText;
+                isTranslated = true;
+                sourceLang = 'es';
+              } else {
+                console.warn(`[Session Sync] Skipping untranslatable Spanish segment in final record: "${rawCandidate}"`);
+                continue;
+              }
+            } catch (e) {
+              continue;
+            }
+          }
+
+          normalizedTranscripts.push({
+            timestamp: s.timestamp ? new Date(s.timestamp) : new Date(),
+            speaker: (s.speaker || '').toLowerCase().includes('sales') ? 'sales_rep' : 'customer',
+            text: finalEnglish,
+            englishText: finalEnglish,
+            originalText: s.originalText || rawCandidate,
+            sourceLanguage: sourceLang,
+            isTranslated,
+            confidence: s.confidence || 0.95,
+          });
+        }
+
+        updateData.transcripts = normalizedTranscripts;
       }
 
       await Session.findOneAndUpdate({ sessionId }, updateData, { new: true });

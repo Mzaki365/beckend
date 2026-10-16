@@ -1,4 +1,4 @@
-// services/sttService.js - Cloud Speech-to-Text Engine for Urdu, Punjabi & English
+// services/sttService.js - Cloud Speech-to-Text Engine for English & Spanish
 const fs = require('fs');
 const path = require('path');
 
@@ -6,22 +6,24 @@ const path = require('path');
  * Transcribe an audio buffer or file using Groq Whisper, OpenAI Whisper, or Google Gemini
  * @param {Buffer} audioBuffer - Binary audio data (webm, wav, etc.)
  * @param {string} mimeType - e.g. "audio/webm"
- * @param {string} language - 'ur' | 'pa' | 'en' | 'auto'
+ * @param {string} language - 'en' | 'es' | 'auto'
  */
-async function transcribeAudio(audioBuffer, mimeType = 'audio/webm', language = 'ur') {
+async function transcribeAudio(audioBuffer, mimeType = 'audio/webm', language = 'auto') {
   const groqKey = process.env.GROQ_API_KEY;
   const openaiKey = process.env.OPENAI_API_KEY;
   const geminiKey = process.env.GEMINI_API_KEY;
 
-  // 1. Try Groq Whisper (Blazing fast ~250ms, exceptional for Urdu & Punjabi)
+  const targetLang = (language || '').toLowerCase().startsWith('es') ? 'es' : ((language || '').toLowerCase().startsWith('en') ? 'en' : null);
+
+  // 1. Try Groq Whisper
   if (groqKey) {
     try {
       const formData = new FormData();
       const blob = new Blob([audioBuffer], { type: mimeType });
       formData.append('file', blob, 'audio.webm');
       formData.append('model', 'whisper-large-v3');
-      if (language && language !== 'auto') {
-        formData.append('language', language.startsWith('ur') ? 'ur' : (language.startsWith('pa') ? 'pa' : 'en'));
+      if (targetLang) {
+        formData.append('language', targetLang);
       }
       formData.append('response_format', 'json');
 
@@ -49,8 +51,8 @@ async function transcribeAudio(audioBuffer, mimeType = 'audio/webm', language = 
       const blob = new Blob([audioBuffer], { type: mimeType });
       formData.append('file', blob, 'audio.webm');
       formData.append('model', 'whisper-1');
-      if (language && language !== 'auto') {
-        formData.append('language', language.startsWith('ur') ? 'ur' : (language.startsWith('pa') ? 'pa' : 'en'));
+      if (targetLang) {
+        formData.append('language', targetLang);
       }
 
       const res = await fetch('https://api.openai.com/v1/audio/transcriptions', {
@@ -74,7 +76,7 @@ async function transcribeAudio(audioBuffer, mimeType = 'audio/webm', language = 
   if (geminiKey) {
     try {
       const base64Audio = audioBuffer.toString('base64');
-      const langPrompt = language.startsWith('ur') ? 'Urdu (اردو)' : (language.startsWith('pa') ? 'Punjabi (پنجابی)' : 'English or Urdu');
+      const langPrompt = targetLang === 'es' ? 'Spanish (español)' : (targetLang === 'en' ? 'English' : 'English or Spanish');
       
       const payload = {
         contents: [
@@ -87,7 +89,7 @@ async function transcribeAudio(audioBuffer, mimeType = 'audio/webm', language = 
                 }
               },
               {
-                text: `You are an accurate retail speech-to-text engine. Listen to this in-store audio clip and transcribe verbatim what was spoken in ${langPrompt}. If spoken in Urdu or Punjabi, transcribe in Urdu/Punjabi script or Roman script exactly as spoken. Return ONLY the transcribed text without any markdown or extra explanation. If silent or unintelligible, return an empty string.`
+                text: `You are an accurate retail speech-to-text engine. Listen to this in-store audio clip and transcribe verbatim what was spoken in ${langPrompt}. If spoken in Spanish, transcribe in Spanish. If spoken in English, transcribe in English. Return ONLY the transcribed text without any markdown or extra explanation. If silent or unintelligible, return an empty string.`
               }
             ]
           }
@@ -109,7 +111,6 @@ async function transcribeAudio(audioBuffer, mimeType = 'audio/webm', language = 
             return { text: transcribed, provider: `gemini-${model}` };
           }
           if (data && !data.error) {
-            // Success response but no speech in audio
             return { text: '', provider: `gemini-${model}` };
           }
         } catch (innerErr) {
@@ -121,7 +122,6 @@ async function transcribeAudio(audioBuffer, mimeType = 'audio/webm', language = 
     }
   }
 
-  // Fallback if no API key is provided
   return {
     text: '',
     provider: 'none',
