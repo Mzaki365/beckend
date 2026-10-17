@@ -16,6 +16,7 @@
 const crypto = require('crypto');
 const Session = require('../models/Session');
 const DailyReport = require('../models/DailyReport');
+const Store = require('../models/Store');
 const Inventory = require('../models/Inventory');
 const dealAnalysisService = require('./dealAnalysisService');
 const { jsPDF } = require('jspdf');
@@ -686,6 +687,151 @@ Rules:
   }
 
   /**
+   * Builds reconciled per-store performance breakdown
+   * Accounts for all configured stores and any stores appearing in session records.
+   * Total sum of conversations, verified sales, and verified revenue matches the combined report.
+   */
+  async buildStoreBreakdown(sessions = [], storeCode = 'all') {
+    const storeSyncService = require('./storeSyncService');
+
+    let configuredStores = [];
+    try {
+      configuredStores = await Store.find({ isActive: true }).lean();
+    } catch (e) {
+      // fallback
+    }
+
+    if (!configuredStores || configuredStores.length === 0) {
+      configuredStores = (storeSyncService.DEFAULT_STORE_CONFIGS || []).map((c) => ({
+        storeCode: c.code,
+        name: c.name,
+        location: c.location,
+        manager: c.manager,
+      }));
+    }
+
+    const storeMap = new Map();
+    configuredStores.forEach((cs) => {
+      const code = (cs.storeCode || cs.code || '').toUpperCase();
+      if (code) {
+        storeMap.set(code, {
+          storeCode: code,
+          storeName: cs.name || code,
+          location: cs.location || 'Store Branch',
+          manager: cs.manager || 'Store Manager',
+          totalConversations: 0,
+          analyzedCount: 0,
+          pendingCount: 0,
+          failedCount: 0,
+          wonCount: 0,
+          lostCount: 0,
+          verifiedSalesCount: 0,
+          verifiedRevenue: 0,
+          conversionRate: 0,
+        });
+      }
+    });
+
+    // Ensure all stores in current sessions exist in storeMap
+    sessions.forEach((s) => {
+      const sc = (s.storeCode || 'UNKNOWN').toUpperCase();
+      if (!storeMap.has(sc)) {
+        let matched = null;
+        for (const [code] of storeMap.entries()) {
+          const cfg = storeSyncService.findStoreConfig(code);
+          const aliases = (cfg?.aliases || []).map((a) => a.toUpperCase());
+          if (aliases.includes(sc)) {
+            matched = code;
+            break;
+          }
+        }
+        if (!matched) {
+          storeMap.set(sc, {
+            storeCode: sc,
+            storeName: s.storeName || sc,
+            location: 'Store Branch',
+            manager: 'Store Manager',
+            totalConversations: 0,
+            analyzedCount: 0,
+            pendingCount: 0,
+            failedCount: 0,
+            wonCount: 0,
+            lostCount: 0,
+            verifiedSalesCount: 0,
+            verifiedRevenue: 0,
+            conversionRate: 0,
+          });
+        }
+      }
+    });
+
+    for (const s of sessions) {
+      let sc = (s.storeCode || 'UNKNOWN').toUpperCase();
+      let targetInfo = storeMap.get(sc);
+      if (!targetInfo) {
+        for (const [code, info] of storeMap.entries()) {
+          const cfg = storeSyncService.findStoreConfig(code);
+          const aliases = (cfg?.aliases || []).map((a) => a.toUpperCase());
+          if (aliases.includes(sc)) {
+            targetInfo = info;
+            break;
+          }
+        }
+      }
+      if (!targetInfo) {
+        targetInfo = storeMap.get('UNKNOWN');
+      }
+      if (!targetInfo) continue;
+
+      targetInfo.totalConversations++;
+
+      const da = s.dealAnalysis || {};
+      const aStatus = da.analysisStatus || 'completed';
+      if (aStatus === 'completed') targetInfo.analyzedCount++;
+      else if (aStatus === 'pending' || aStatus === 'analyzing') targetInfo.pendingCount++;
+      else if (aStatus === 'failed') targetInfo.failedCount++;
+
+      let salesOutcome = da.salesOutcome;
+      if (!salesOutcome) {
+        const raw = da.conversationOutcome || s.analytics?.dealOutcome;
+        if (raw === 'Sale Confirmed' || raw === 'won') salesOutcome = 'Won';
+        else if (raw === 'Not Converted' || raw === 'lost') salesOutcome = 'Lost';
+        else if (raw === 'Follow-up Required' || raw === 'in_negotiation') salesOutcome = 'Pending';
+      }
+
+      if (salesOutcome === 'Won') targetInfo.wonCount++;
+      else if (salesOutcome === 'Lost') targetInfo.lostCount++;
+
+      const isCancelled = s.status === 'cancelled' || s.transactionStatus === 'cancelled' || s.transactionStatus === 'refunded';
+      const isSaleVerified = Boolean(s.verifiedSale === true || (s.transactionId && s.isSaleVerified === true)) && !isCancelled;
+      if (isSaleVerified) {
+        targetInfo.verifiedSalesCount++;
+        if (typeof s.verifiedRevenue === 'number' && !isNaN(s.verifiedRevenue) && s.verifiedRevenue > 0) {
+          targetInfo.verifiedRevenue += s.verifiedRevenue;
+        }
+      }
+    }
+
+    const breakdownList = [];
+    for (const info of storeMap.values()) {
+      info.conversionRate = info.totalConversations > 0 ? Math.round((info.wonCount / info.totalConversations) * 100) : 0;
+      info.verifiedRevenueDisplay = info.verifiedRevenue > 0 ? `$${info.verifiedRevenue.toLocaleString()}` : '$0';
+
+      if (storeCode !== 'all') {
+        const cfg = storeSyncService.findStoreConfig(storeCode);
+        const possibleCodes = [cfg?.code, cfg?.id, storeCode, ...(cfg?.aliases || [])].map((c) => String(c).toUpperCase());
+        if (possibleCodes.includes(info.storeCode)) {
+          breakdownList.push(info);
+        }
+      } else {
+        breakdownList.push(info);
+      }
+    }
+
+    return breakdownList;
+  }
+
+  /**
    * Retrieves an existing saved report for a date and store scope WITHOUT generating a new one
    * @param {Object} params - { date, store, salesperson }
    * @param {Object} user - Authenticated user context
@@ -754,6 +900,7 @@ Rules:
       businessTimezone: savedReport.businessTimezone || range.businessTimezone,
       reportingDateRule: range.reportingDateRule,
       metrics: savedReport.metrics || {},
+      storeBreakdown: savedReport.storeBreakdown || [],
       dailyTrends: savedReport.dailyTrends || [],
       aiSummary: savedReport.aiSummary || {},
       conversations: savedReport.conversations || [],
@@ -784,7 +931,7 @@ Rules:
     const sortOrder = params.sort === 'oldest' ? { startedAt: 1 } : { startedAt: -1 };
 
     // Fetch matching completed sessions from MongoDB
-    const rawSessions = await Session.find(filter).sort(sortOrder).limit(300);
+    const rawSessions = await Session.find(filter).sort(sortOrder);
 
     // Deduplicate strictly by sessionId (each conversation counted exactly once)
     const sessionMap = new Map();
@@ -814,6 +961,9 @@ Rules:
 
     // Deterministic metrics calculation
     const { metrics, dataLimitations } = await this.calculateAuthoritativeMetrics(sessions, { storeCode });
+
+    // Build reconciled store-level performance breakdown across all configured and active stores
+    const storeBreakdown = await this.buildStoreBreakdown(sessions, storeCode);
 
     // Format all individual conversation reports
     const formattedConversations = sessions.map((s) => this.formatConversationReport(s));
@@ -862,6 +1012,7 @@ Rules:
       salesperson,
       businessTimezone: range.businessTimezone,
       metrics,
+      storeBreakdown,
       dailyTrends,
       aiSummary,
       conversations: formattedConversations,
@@ -906,6 +1057,7 @@ Rules:
       businessTimezone: range.businessTimezone,
       reportingDateRule: range.reportingDateRule,
       metrics,
+      storeBreakdown,
       dailyTrends,
       aiSummary,
       conversations: formattedConversations,
@@ -971,7 +1123,8 @@ Rules:
     );
 
     // Store name & dates
-    const storeName = activeFilters.store && activeFilters.store !== 'all' ? activeFilters.store : (currentUser?.storeCode || 'lahore');
+    const isAllStores = !activeFilters.store || activeFilters.store === 'all';
+    const storeName = isAllStores ? 'All Retail Branches' : (activeFilters.store || currentUser?.storeCode || 'Store Branch');
     const fullDateStr = (() => {
       try {
         const parts = String(reportData.date || dateLabel).split('-');
@@ -1239,6 +1392,42 @@ Rules:
     });
 
     y += 3;
+
+    // 8B. STORE PERFORMANCE BREAKDOWN (Rendered when All Stores or multi-branch report)
+    const storeBreakdown = reportData.storeBreakdown || [];
+    if (isAllStores && storeBreakdown.length > 0) {
+      y = drawPillBadge(14, y, [13, 148, 136], 'STORE PERFORMANCE BREAKDOWN');
+      autoTable(doc, {
+        startY: y,
+        head: [['Store / Branch', 'Location & Manager', 'Conversations', 'Analyzed', 'Won', 'Sales Won', 'Revenue', 'Conv. Rate']],
+        body: storeBreakdown.map((sb) => [
+          `${sb.storeName || sb.storeCode} (${sb.storeCode})`,
+          `${sb.location || 'Branch'} · ${sb.manager || 'Manager'}`,
+          String(sb.totalConversations || 0),
+          String(sb.analyzedCount || 0),
+          String(sb.wonCount || 0),
+          String(sb.verifiedSalesCount || 0),
+          sb.verifiedRevenueDisplay || '$0',
+          `${sb.conversionRate || 0}%`,
+        ]),
+        foot: [[
+          'Total Reconciled',
+          'All Authorized Branches',
+          String(totalConversations),
+          String(metrics.completedAnalysisCount || 0),
+          String(metrics.wonCount || 0),
+          String(verifiedSalesCount),
+          revenueDisplay,
+          `${metrics.conversionRate || 0}%`,
+        ]],
+        theme: 'striped',
+        headStyles: { fillColor: [13, 148, 136], textColor: [255, 255, 255], fontSize: 7, fontStyle: 'bold' },
+        footStyles: { fillColor: [241, 245, 249], textColor: [15, 23, 42], fontSize: 7, fontStyle: 'bold' },
+        bodyStyles: { fontSize: 6.8, textColor: [51, 65, 85] },
+        margin: { left: 14, right: 14 },
+      });
+      y = (doc.lastAutoTable?.finalY || y) + 5;
+    }
 
     // 9. CONVERSATIONS & TRANSCRIPTS Section
     y = drawPillBadge(14, y, [37, 99, 235], 'CONVERSATIONS & TRANSCRIPTS');
