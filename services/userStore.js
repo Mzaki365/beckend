@@ -205,18 +205,18 @@ async function createUser({ name, email, password, role, storeCode = 'STORE-01',
 
   // Canonicalize store code and name to the 3 configured retail stores
   let canonicalCode = 'STORE-01';
-  let canonicalName = 'iPhone Store 01';
+  let canonicalName = 'Star Store 01';
 
   const cleanStore = (storeCode || '').toUpperCase().trim();
   if (cleanStore.includes('02') || cleanStore.includes('LA')) {
     canonicalCode = 'STORE-02';
-    canonicalName = 'iPhone Store 02';
+    canonicalName = 'Star Store 02';
   } else if (cleanStore.includes('03') || cleanStore.includes('MIA')) {
     canonicalCode = 'STORE-03';
-    canonicalName = 'iPhone Store 03';
+    canonicalName = 'Star Store 03';
   } else {
     canonicalCode = 'STORE-01';
-    canonicalName = 'iPhone Store 01';
+    canonicalName = 'Star Store 01';
   }
 
   const assignedRole = 'sales_manager';

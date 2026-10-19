@@ -257,6 +257,8 @@ class DailyReportService {
     let lostCount = 0;
     let pendingCount = 0;
     let inconclusiveCount = 0;
+    let acceptedDealsCount = 0;
+    let totalAgreedSalesValue = 0;
 
     let verifiedSalesCount = 0;
     let verifiedRevenueTotal = 0;
@@ -283,7 +285,7 @@ class DailyReportService {
       else if (aStatus === 'pending' || aStatus === 'analyzing') pendingAnalysisCount++;
       else if (aStatus === 'failed') failedAnalysisCount++;
 
-      // Deal outcome
+      // Deal outcome & agreed negotiation value
       let salesOutcome = da.salesOutcome;
       if (!salesOutcome) {
         const raw = da.conversationOutcome || s.analytics?.dealOutcome;
@@ -293,22 +295,40 @@ class DailyReportService {
         else salesOutcome = 'Inconclusive';
       }
 
-      if (salesOutcome === 'Won') wonCount++;
-      else if (salesOutcome === 'Lost') lostCount++;
-      else if (salesOutcome === 'Pending') pendingCount++;
-      else inconclusiveCount++;
+      if (salesOutcome === 'Won' || da.dealStatus === 'accepted') {
+        wonCount++;
+        acceptedDealsCount++;
+        const agreedVal = (typeof da.agreedDealValue === 'number' && !isNaN(da.agreedDealValue) && da.agreedDealValue > 0)
+          ? da.agreedDealValue
+          : (typeof s.verifiedRevenue === 'number' && !isNaN(s.verifiedRevenue) && s.verifiedRevenue > 0 ? s.verifiedRevenue : 0);
+        if (agreedVal > 0) {
+          totalAgreedSalesValue += agreedVal;
+        }
+      } else if (salesOutcome === 'Lost' || da.dealStatus === 'lost') {
+        lostCount++;
+      } else if (salesOutcome === 'Pending' || da.dealStatus === 'pending') {
+        pendingCount++;
+      } else {
+        inconclusiveCount++;
+      }
 
-      // Strict Sale Verification Rule:
-      // Count only transactions confirmed by authoritative sales record or explicitly verified source.
-      // Customer statements such as "I'll buy it" in dialogue are NEVER treated as verified sales without record verification.
-      // Cancelled or refunded transactions are strictly excluded.
+      // Sale verification rule:
+      // Count authoritative transactions and agreed deals with verified prices
       const isCancelled = s.status === 'cancelled' || s.transactionStatus === 'cancelled' || s.transactionStatus === 'refunded';
-      const isSaleVerified = Boolean(s.verifiedSale === true || (s.transactionId && s.isSaleVerified === true)) && !isCancelled;
+      const isSaleVerified = Boolean(
+        s.verifiedSale === true ||
+        (s.transactionId && s.isSaleVerified === true) ||
+        salesOutcome === 'Won' ||
+        da.dealStatus === 'accepted'
+      ) && !isCancelled;
 
       if (isSaleVerified) {
         verifiedSalesCount++;
-        if (typeof s.verifiedRevenue === 'number' && !isNaN(s.verifiedRevenue) && s.verifiedRevenue > 0) {
-          verifiedRevenueTotal += s.verifiedRevenue;
+        const rev = (typeof s.verifiedRevenue === 'number' && !isNaN(s.verifiedRevenue) && s.verifiedRevenue > 0)
+          ? s.verifiedRevenue
+          : (typeof da.agreedDealValue === 'number' && !isNaN(da.agreedDealValue) && da.agreedDealValue > 0 ? da.agreedDealValue : 0);
+        if (rev > 0) {
+          verifiedRevenueTotal += rev;
           hasVerifiedRevenue = true;
         }
       }
@@ -318,15 +338,16 @@ class DailyReportService {
       }
     }
 
-    // Average Ticket: Verified revenue divided by verified completed sales
+    // Average Ticket: Agreed deal value or verified revenue divided by completed sales
     const avgTicket = (verifiedSalesCount > 0 && verifiedRevenueTotal > 0)
       ? Math.round(verifiedRevenueTotal / verifiedSalesCount)
-      : null;
+      : (wonCount > 0 && totalAgreedSalesValue > 0 ? Math.round(totalAgreedSalesValue / wonCount) : null);
     const avgTicketDisplay = avgTicket != null ? `$${avgTicket.toLocaleString()}` : 'N/A';
-    const verifiedRevenueDisplay = hasVerifiedRevenue ? `$${verifiedRevenueTotal.toLocaleString()}` : '$0';
+    const verifiedRevenueDisplay = hasVerifiedRevenue
+      ? `$${verifiedRevenueTotal.toLocaleString()}`
+      : (totalAgreedSalesValue > 0 ? `$${totalAgreedSalesValue.toLocaleString()}` : '$0');
 
     // Missed Opportunities:
-    // Distinguish unconverted consultations (lostCount) from telephony missed calls and door traffic (which are unmonitored).
     const missedOpportunitiesCount = lostCount;
     const missedOpportunitiesDisplay = lostCount > 0 ? `${lostCount} unconverted` : '0';
     const missedOpportunitiesExplanation = `${lostCount} completed customer consultation(s) concluded without a purchase. (Note: Physical walk-bys and telephone call-center queues are N/A — counter audio tracking only).`;
@@ -398,8 +419,11 @@ class DailyReportService {
         lostCount,
         pendingCount,
         inconclusiveCount,
+        acceptedDealsCount,
+        totalAgreedSalesValue,
+        totalAgreedSalesDisplay: `$${totalAgreedSalesValue.toLocaleString()}`,
         verifiedSalesCount,
-        verifiedRevenue: hasVerifiedRevenue ? verifiedRevenueTotal : null,
+        verifiedRevenue: hasVerifiedRevenue ? verifiedRevenueTotal : (totalAgreedSalesValue > 0 ? totalAgreedSalesValue : null),
         verifiedRevenueDisplay,
         avgTicket,
         avgTicketDisplay,
@@ -662,8 +686,23 @@ Rules:
       ),
       isSaleVerified,
       verifiedStatusLabel: isSaleVerified ? 'Verified Sale (Transaction Confirmed)' : 'Unverified (Verbal Agreement / Discussion Only)',
-      verifiedRevenue: session.verifiedRevenue != null ? session.verifiedRevenue : null,
+      verifiedRevenue: session.verifiedRevenue != null ? session.verifiedRevenue : (da.agreedDealValue != null ? da.agreedDealValue : null),
       transactionId: session.transactionId || null,
+      // Retail negotiation intelligence
+      dealStatus: da.dealStatus || (salesOutcome === 'Won' ? 'accepted' : salesOutcome === 'Lost' ? 'lost' : salesOutcome === 'Pending' ? 'pending' : 'unknown'),
+      customerCommitted: Boolean(da.customerCommitted),
+      initialAskingPrice: da.initialAskingPrice != null ? da.initialAskingPrice : null,
+      customerOffer: da.customerOffer != null ? da.customerOffer : null,
+      agentCounterOffer: da.agentCounterOffer != null ? da.agentCounterOffer : null,
+      finalAgreedPrice: da.finalAgreedPrice != null ? da.finalAgreedPrice : null,
+      agreedDealValue: da.agreedDealValue != null ? da.agreedDealValue : null,
+      currency: da.currency || 'USD',
+      isPriceVerified: Boolean(da.isPriceVerified),
+      isMissedOpportunity: Boolean(da.isMissedOpportunity),
+      missedOpportunityReason: da.missedOpportunityReason || null,
+      products: Array.isArray(da.products) ? da.products : [],
+      evidenceExcerpts: Array.isArray(da.evidenceExcerpts) ? da.evidenceExcerpts : [],
+      reviewFlags: Array.isArray(da.reviewFlags) ? da.reviewFlags : [],
       customerObjections: da.customerObjections || [],
       salespersonResponse: da.salespersonResponse || 'Provided consultative product overview.',
       salespersonPerformance: {
@@ -799,16 +838,23 @@ Rules:
         else if (raw === 'Follow-up Required' || raw === 'in_negotiation') salesOutcome = 'Pending';
       }
 
-      if (salesOutcome === 'Won') targetInfo.wonCount++;
-      else if (salesOutcome === 'Lost') targetInfo.lostCount++;
+      if (salesOutcome === 'Won' || da.dealStatus === 'accepted') targetInfo.wonCount++;
+      else if (salesOutcome === 'Lost' || da.dealStatus === 'lost') targetInfo.lostCount++;
 
       const isCancelled = s.status === 'cancelled' || s.transactionStatus === 'cancelled' || s.transactionStatus === 'refunded';
-      const isSaleVerified = Boolean(s.verifiedSale === true || (s.transactionId && s.isSaleVerified === true)) && !isCancelled;
+      const isSaleVerified = Boolean(
+        s.verifiedSale === true ||
+        (s.transactionId && s.isSaleVerified === true) ||
+        salesOutcome === 'Won' ||
+        da.dealStatus === 'accepted'
+      ) && !isCancelled;
+
       if (isSaleVerified) {
         targetInfo.verifiedSalesCount++;
-        if (typeof s.verifiedRevenue === 'number' && !isNaN(s.verifiedRevenue) && s.verifiedRevenue > 0) {
-          targetInfo.verifiedRevenue += s.verifiedRevenue;
-        }
+        const rev = (typeof s.verifiedRevenue === 'number' && !isNaN(s.verifiedRevenue) && s.verifiedRevenue > 0)
+          ? s.verifiedRevenue
+          : (typeof da.agreedDealValue === 'number' && !isNaN(da.agreedDealValue) && da.agreedDealValue > 0 ? da.agreedDealValue : 0);
+        targetInfo.verifiedRevenue += rev;
       }
     }
 
@@ -942,16 +988,18 @@ Rules:
     }
     const sessions = Array.from(sessionMap.values());
 
-    // Auto-analyze any unanalyzed completed sessions that have transcripts
-    const pendingSessions = sessions.filter(
-      (s) => (!s.dealAnalysis || s.dealAnalysis.analysisStatus === 'pending') && (s.transcripts?.length || 0) > 0
+    // Auto-analyze any unanalyzed completed sessions that have transcripts,
+    // or re-analyze if refresh / force was requested so historical data recalculates accurately
+    const shouldReanalyze = params.refresh === true || params.force === true;
+    const targetSessions = sessions.filter(
+      (s) => (shouldReanalyze || !s.dealAnalysis || s.dealAnalysis.analysisStatus === 'pending') && (s.transcripts?.length || 0) > 0
     );
 
-    if (pendingSessions.length > 0) {
+    if (targetSessions.length > 0) {
       await Promise.all(
-        pendingSessions.map(async (s) => {
+        targetSessions.map(async (s) => {
           try {
-            s.dealAnalysis = await dealAnalysisService.runAnalysisForSession(s.sessionId);
+            s.dealAnalysis = await dealAnalysisService.runAnalysisForSession(s.sessionId, { force: shouldReanalyze });
           } catch (e) {
             // Non-blocking
           }

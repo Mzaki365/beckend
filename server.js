@@ -1,5 +1,9 @@
 // server.js - Storelistener Backend Server
 require('dotenv').config();
+const dns = require('dns');
+try {
+  dns.setServers(['8.8.8.8', '1.1.1.1']);
+} catch (e) {}
 const http = require('http');
 const path = require('path');
 const express = require('express');
@@ -115,7 +119,7 @@ async function initDatabase() {
   if (mongoose.connection.readyState === 1) return mongoose.connection;
   if (dbPromise) return dbPromise;
 
-  const MONGODB_URI = process.env.MONGODB_URI || 'mongodb+srv://sarfrazafzal790_db_user:uf5VWKdvIil4yXUS@storelistener.sy7em7l.mongodb.net/storelistener?retryWrites=true&w=majority&appName=Storelistener';
+  const MONGODB_URI = process.env.MONGODB_URI || 'mongodb+srv://muhammadzakijutt036_db_user:QTRc6gDXvWa2cqN1@cluster0.iykomfy.mongodb.net/storelistener?retryWrites=true&w=majority';
 
   dbPromise = mongoose.connect(MONGODB_URI, {
     serverSelectionTimeoutMS: 5000,

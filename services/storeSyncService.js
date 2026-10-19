@@ -15,13 +15,13 @@ const Store = require('../models/Store');
 const Session = require('../models/Session');
 const { JWT_SECRET } = require('../middleware/auth');
 
-// Canonical Store Definitions matching the 3 configured iPhone retail branches
+// Canonical Store Definitions matching the 3 configured Star retail branches
 const DEFAULT_STORE_CONFIGS = [
   {
     id: 'store-01',
     code: 'STORE-01',
     aliases: ['STR-01', 'STORE-NYC-01', 'store-01'],
-    name: 'iPhone Store 01',
+    name: 'Star Store 01',
     location: 'Flagship - 5th Ave, New York',
     manager: 'David Miller',
     workstationsCount: 3,
@@ -30,7 +30,7 @@ const DEFAULT_STORE_CONFIGS = [
     id: 'store-02',
     code: 'STORE-02',
     aliases: ['STR-02', 'STORE-LA-02', 'store-02'],
-    name: 'iPhone Store 02',
+    name: 'Star Store 02',
     location: 'Galleria - Beverly Hills, Los Angeles',
     manager: 'Sarah Jenkins',
     workstationsCount: 3,
@@ -39,7 +39,7 @@ const DEFAULT_STORE_CONFIGS = [
     id: 'store-03',
     code: 'STORE-03',
     aliases: ['STR-03', 'STORE-MIA-03', 'store-03'],
-    name: 'iPhone Store 03',
+    name: 'Star Store 03',
     location: 'Metropolitan - Brickell, Miami',
     manager: 'Carlos Rodriguez',
     workstationsCount: 2,

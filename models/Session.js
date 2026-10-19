@@ -184,6 +184,71 @@ const SessionSchema = new mongoose.Schema({
       enum: ['Won', 'Lost', 'Pending', 'Inconclusive'],
       default: 'Inconclusive'
     },
+    dealStatus: {
+      type: String,
+      enum: ['accepted', 'lost', 'pending', 'unknown', 'no_opportunity'],
+      default: 'unknown'
+    },
+    customerCommitted: {
+      type: Boolean,
+      default: false
+    },
+    initialAskingPrice: {
+      type: Number,
+      default: null
+    },
+    customerOffer: {
+      type: Number,
+      default: null
+    },
+    agentCounterOffer: {
+      type: Number,
+      default: null
+    },
+    finalAgreedPrice: {
+      type: Number,
+      default: null
+    },
+    agreedDealValue: {
+      type: Number,
+      default: null
+    },
+    realizedRevenue: {
+      type: Number,
+      default: null
+    },
+    currency: {
+      type: String,
+      default: 'USD'
+    },
+    isPriceVerified: {
+      type: Boolean,
+      default: false
+    },
+    isMissedOpportunity: {
+      type: Boolean,
+      default: false
+    },
+    missedOpportunityReason: {
+      type: String,
+      default: null
+    },
+    products: [{
+      name: { type: String },
+      askingPrice: { type: Number, default: null },
+      customerOffer: { type: Number, default: null },
+      counterOffer: { type: Number, default: null },
+      agreedPrice: { type: Number, default: null },
+      status: { type: String, default: 'quoted' }
+    }],
+    evidenceExcerpts: [{
+      quote: { type: String },
+      speaker: { type: String },
+      context: { type: String }
+    }],
+    reviewFlags: [{
+      type: String
+    }],
     isSaleVerified: {
       type: Boolean,
       default: false

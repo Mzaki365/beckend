@@ -20,9 +20,9 @@ const storeSyncService = require('../services/storeSyncService');
 
 // Allowed retail store configurations (Module 10 requirement)
 const VALID_STORES = [
-  { code: 'STORE-01', name: 'iPhone Store 01' },
-  { code: 'STORE-02', name: 'iPhone Store 02' },
-  { code: 'STORE-03', name: 'iPhone Store 03' },
+  { code: 'STORE-01', name: 'Star Store 01' },
+  { code: 'STORE-02', name: 'Star Store 02' },
+  { code: 'STORE-03', name: 'Star Store 03' },
 ];
 
 // Helper to sign JWT token - minimal claims only, NO sensitive details or passwords

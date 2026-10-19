@@ -80,6 +80,325 @@ class DealAnalysisService {
   }
 
   /**
+   * Extracts individual prices from a single conversational turn
+   */
+  extractTurnPrices(text) {
+    if (!text) return [];
+    const prices = [];
+    const dollarRegex = /\$\s*(\d+(?:\.\d{1,2})?)/g;
+    let match;
+    while ((match = dollarRegex.exec(text)) !== null) {
+      const val = parseFloat(match[1]);
+      if (!isNaN(val)) prices.push(val);
+    }
+    const wordRegex = /\b(\d+(?:\.\d{1,2})?)\s*(?:dollars|bucks|usd)\b/gi;
+    while ((match = wordRegex.exec(text)) !== null) {
+      const val = parseFloat(match[1]);
+      if (!isNaN(val) && !prices.includes(val)) prices.push(val);
+    }
+    return prices;
+  }
+
+  /**
+   * Extracts multi-product price breakdowns from a single or combined conversational turn
+   */
+  extractMultiProductPrices(text) {
+    if (!text) return [];
+    const items = [];
+    const productKeywords = [
+      { name: 'iPhone', pattern: /iphone/i },
+      { name: 'Charger', pattern: /charger|adapter|magsafe/i },
+      { name: 'Case', pattern: /case|cover/i },
+      { name: 'Screen Protector', pattern: /screen protector|tempered glass/i },
+      { name: 'AirPods', pattern: /airpods/i },
+      { name: 'Apple Watch', pattern: /watch/i },
+    ];
+
+    const clauses = text.split(/\band\b|,|;/i);
+    for (const clause of clauses) {
+      const prices = this.extractTurnPrices(clause);
+      if (prices.length > 0) {
+        let matched = null;
+        for (const pk of productKeywords) {
+          if (pk.pattern.test(clause)) {
+            matched = pk.name;
+            break;
+          }
+        }
+        if (matched) {
+          items.push({ name: matched, price: prices[0], quantity: 1 });
+        }
+      }
+    }
+
+    if (items.length >= 2) {
+      return items;
+    }
+
+    const allPrices = this.extractTurnPrices(text);
+    if (allPrices.length >= 2) {
+      const matchedNames = [];
+      for (const pk of productKeywords) {
+        if (pk.pattern.test(text) && !matchedNames.includes(pk.name)) {
+          matchedNames.push(pk.name);
+        }
+      }
+      if (matchedNames.length >= allPrices.length) {
+        return allPrices.map((price, idx) => ({
+          name: matchedNames[idx] || `Item ${idx + 1}`,
+          price,
+          quantity: 1,
+        }));
+      }
+    }
+
+    return items;
+  }
+
+  /**
+   * Evaluates complete retail conversation for negotiation dynamics, deal outcome & agreed price
+   */
+  analyzeDealNegotiation(transcripts = []) {
+    if (!Array.isArray(transcripts) || transcripts.length === 0) {
+      return {
+        dealStatus: 'no_opportunity',
+        salesOutcome: 'Inconclusive',
+        customerCommitted: false,
+        initialAskingPrice: null,
+        customerOffer: null,
+        agentCounterOffer: null,
+        finalAgreedPrice: null,
+        agreedDealValue: 0,
+        realizedRevenue: 0,
+        currency: 'USD',
+        isPriceVerified: false,
+        isMissedOpportunity: false,
+        missedOpportunityReason: null,
+        products: [],
+        evidenceExcerpts: [],
+        reviewFlags: ['no_dialogue'],
+      };
+    }
+
+    let initialAskingPrice = null;
+    const customerOffers = [];
+    const agentOffers = [];
+    let agentAgreedPrice = null;
+    let agentRefused = false;
+    let customerCommitted = false;
+    let customerWithdrew = false;
+    let customerPending = false;
+    let customerRejected = false;
+    let multiProducts = [];
+    const evidenceExcerpts = [];
+    const reviewFlags = [];
+
+    const fullText = transcripts.map((t) => `${(t.speaker || '').toUpperCase()}: ${t.englishText || t.text || ''}`).join('\n');
+    const lowerFull = fullText.toLowerCase();
+
+    // Check if there are any products discussed
+    const productsDiscussed = this.extractProductsDiscussed(fullText);
+
+    for (const t of transcripts) {
+      const rawSpeaker = (t.speaker || '').toLowerCase();
+      const isRep = rawSpeaker.includes('sales') || rawSpeaker.includes('employee') || rawSpeaker.includes('rep') || rawSpeaker.includes('agent');
+      const isCustomer = rawSpeaker.includes('customer') || rawSpeaker.includes('client') || (!isRep && rawSpeaker.includes('user'));
+      const text = (t.englishText || t.text || '').trim();
+      const lower = text.toLowerCase();
+
+      const prices = this.extractTurnPrices(text);
+      const multi = this.extractMultiProductPrices(text);
+      if (multi.length >= 2) {
+        multiProducts = multi;
+      }
+
+      if (isRep) {
+        if (prices.length > 0) {
+          if (initialAskingPrice === null && customerOffers.length === 0) {
+            initialAskingPrice = prices[0];
+          }
+
+          // Check if rep accepts customer's offer
+          const isAgreePhrase = /\b(okay|ok|yes|deal|sure|fine|done|i can do|we can do)\b/i.test(lower);
+          const isRefusePhrase = /\b(sorry|cannot|can't|cant|no|minimum|lowest|firm)\b/i.test(lower);
+
+          if (isRefusePhrase) {
+            agentRefused = true;
+            agentOffers.push(prices[0]);
+            evidenceExcerpts.push({ excerpt: text, role: 'sales_rep', reason: 'Sales rep refused customer offer / counter-offered' });
+          } else if (isAgreePhrase) {
+            agentAgreedPrice = prices[0];
+            evidenceExcerpts.push({ excerpt: text, role: 'sales_rep', reason: 'Sales rep agreed to negotiated price' });
+          } else {
+            agentOffers.push(prices[0]);
+          }
+        }
+      } else if (isCustomer) {
+        // Customer turn
+        const isCommitPhrase = /\b(pack it|pack them|pack it up|i'll take it|ill take it|i will take it|ring it up|wrap it up|charge my card|here's my card|heres my card|take my money|buy it)\b/i.test(lower);
+        const isWithdrawPhrase = /\b(wait|never mind|nevermind|cancel|cannot afford|cant afford|changed my mind|take it back|actually no)\b/i.test(lower);
+        const isPendingPhrase = /\b(think about it|need to think|let me think|come back later|talk to my wife|talk to my husband|sleep on it|consult)\b/i.test(lower);
+        const isRejectPhrase = /\b(don't want|dont want|no thanks|too expensive|too much|pass on|not interested|forget it|no deal)\b/i.test(lower);
+
+        if (isWithdrawPhrase) {
+          customerWithdrew = true;
+          customerCommitted = false;
+          evidenceExcerpts.push({ excerpt: text, role: 'customer', reason: 'Customer withdrew acceptance' });
+        } else if (isRejectPhrase) {
+          customerRejected = true;
+          customerCommitted = false;
+          evidenceExcerpts.push({ excerpt: text, role: 'customer', reason: 'Customer rejected product or price' });
+        } else if (isPendingPhrase) {
+          customerPending = true;
+          customerCommitted = false;
+          evidenceExcerpts.push({ excerpt: text, role: 'customer', reason: 'Customer requested time to consider' });
+        } else if (isCommitPhrase) {
+          customerCommitted = true;
+          customerPending = false;
+          customerRejected = false;
+          customerWithdrew = false;
+          evidenceExcerpts.push({ excerpt: text, role: 'customer', reason: 'Customer accepted deal' });
+        }
+
+        if (prices.length > 0) {
+          customerOffers.push(prices[0]);
+          evidenceExcerpts.push({ excerpt: text, role: 'customer', reason: 'Customer proposed offer price' });
+        }
+      }
+    }
+
+    // Determine dealStatus and financials
+    let dealStatus = 'unknown';
+    let salesOutcome = 'Inconclusive';
+    let finalAgreedPrice = null;
+    let agreedDealValue = 0;
+    let realizedRevenue = 0;
+    let isPriceVerified = false;
+    let isMissedOpportunity = false;
+    let missedOpportunityReason = null;
+    let finalProducts = [];
+
+    if (multiProducts.length >= 2) {
+      finalProducts = multiProducts;
+    } else if (productsDiscussed.length > 0) {
+      finalProducts = productsDiscussed.map((name) => ({ name, price: null, quantity: 1 }));
+    }
+
+    // 1. Withdrawal
+    if (customerWithdrew) {
+      dealStatus = 'lost';
+      salesOutcome = 'Lost';
+      agreedDealValue = 0;
+      realizedRevenue = 0;
+      isMissedOpportunity = true;
+      missedOpportunityReason = (agentRefused || customerOffers.length > 0 || lowerFull.includes('afford') || lowerFull.includes('expensive'))
+        ? 'price_disagreement'
+        : 'customer_rejection';
+    }
+    // 2. Customer Rejection or Agent Refusal that ended without sale
+    else if (customerRejected || (agentRefused && !customerCommitted)) {
+      dealStatus = 'lost';
+      salesOutcome = 'Lost';
+      agreedDealValue = 0;
+      realizedRevenue = 0;
+      isMissedOpportunity = true;
+      missedOpportunityReason = (agentRefused || customerOffers.length > 0 || lowerFull.includes('expensive') || lowerFull.includes('price'))
+        ? 'price_disagreement'
+        : 'customer_rejection';
+    }
+    // 3. Pending
+    else if (customerPending) {
+      dealStatus = 'pending';
+      salesOutcome = 'Pending';
+      agreedDealValue = 0;
+      realizedRevenue = 0;
+      customerCommitted = false;
+      isMissedOpportunity = false;
+      if (agentAgreedPrice !== null) {
+        finalAgreedPrice = agentAgreedPrice;
+      }
+    }
+    // 4. Customer Committed / Accepted
+    else if (customerCommitted) {
+      dealStatus = 'accepted';
+      salesOutcome = 'Won';
+      isMissedOpportunity = false;
+
+      if (multiProducts.length >= 2) {
+        const total = multiProducts.reduce((sum, p) => sum + (p.price || 0), 0);
+        finalAgreedPrice = total;
+        agreedDealValue = total;
+        realizedRevenue = total;
+        isPriceVerified = true;
+      } else if (agentAgreedPrice !== null) {
+        finalAgreedPrice = agentAgreedPrice;
+        agreedDealValue = agentAgreedPrice;
+        realizedRevenue = agentAgreedPrice;
+        isPriceVerified = true;
+      } else if (customerOffers.length > 0) {
+        const lastOffer = customerOffers[customerOffers.length - 1];
+        finalAgreedPrice = lastOffer;
+        agreedDealValue = lastOffer;
+        realizedRevenue = lastOffer;
+        isPriceVerified = true;
+      } else if (initialAskingPrice !== null) {
+        finalAgreedPrice = initialAskingPrice;
+        agreedDealValue = initialAskingPrice;
+        realizedRevenue = initialAskingPrice;
+        isPriceVerified = true;
+      } else {
+        // Price unverified (Scenario F)
+        isPriceVerified = false;
+        finalAgreedPrice = null;
+        agreedDealValue = null;
+        realizedRevenue = null;
+        reviewFlags.push('unverified_price');
+      }
+
+      if (finalProducts.length === 1 && typeof finalAgreedPrice === 'number') {
+        finalProducts[0].price = finalAgreedPrice;
+      }
+    }
+    // 5. Ambiguous or no sales opportunity established
+    else {
+      const isSalesConversation = productsDiscussed.length > 0 || initialAskingPrice !== null || customerOffers.length > 0;
+      if (!isSalesConversation) {
+        dealStatus = 'no_opportunity';
+        salesOutcome = 'Inconclusive';
+      } else {
+        dealStatus = 'unknown';
+        salesOutcome = 'Inconclusive';
+        reviewFlags.push('inconclusive_outcome');
+      }
+      agreedDealValue = 0;
+      realizedRevenue = 0;
+      isMissedOpportunity = false;
+    }
+
+    const lastCustomerOffer = customerOffers.length > 0 ? customerOffers[customerOffers.length - 1] : null;
+    const lastAgentOffer = agentOffers.length > 0 ? agentOffers[agentOffers.length - 1] : null;
+
+    return {
+      dealStatus,
+      salesOutcome,
+      customerCommitted,
+      initialAskingPrice,
+      customerOffer: lastCustomerOffer,
+      agentCounterOffer: lastAgentOffer,
+      finalAgreedPrice,
+      agreedDealValue,
+      realizedRevenue,
+      currency: 'USD',
+      isPriceVerified,
+      isMissedOpportunity,
+      missedOpportunityReason,
+      products: finalProducts,
+      evidenceExcerpts,
+      reviewFlags,
+    };
+  }
+
+  /**
    * Extracts prices, budgets, or payment amounts mentioned in text
    */
   extractBudgetAndPrices(fullText) {
@@ -414,14 +733,26 @@ class DealAnalysisService {
    * Deterministic local analysis engine (100% reliable fallback)
    */
   analyzeDeterministic(transcripts = [], metadata = {}) {
-    const fullText = transcripts.map((t) => `${(t.speaker || '').toUpperCase()}: ${t.text}`).join('\n');
-    const productsDiscussed = this.extractProductsDiscussed(fullText);
-    const budgetAndPrice = this.extractBudgetAndPrices(fullText);
+    const fullText = transcripts.map((t) => `${(t.speaker || '').toUpperCase()}: ${t.englishText || t.text}`).join('\n');
+    const negotiation = this.analyzeDealNegotiation(transcripts);
+    const productsDiscussed = negotiation.products.length > 0 ? negotiation.products.map(p => p.name) : this.extractProductsDiscussed(fullText);
+    const budgetAndPrice = negotiation.finalAgreedPrice ? `$${negotiation.finalAgreedPrice}` : this.extractBudgetAndPrices(fullText);
     const customerRequirements = this.extractCustomerRequirements(transcripts);
     const { questions, objections } = this.extractQuestionsAndObjections(transcripts);
     const salespersonResponse = this.extractSalespersonResponse(transcripts, objections);
-    const conversationOutcome = this.classifyOutcome(fullText, transcripts);
-    const customerBuyingIntent = this.classifyBuyingIntent(fullText, conversationOutcome === 'Sale Confirmed' ? 1 : 0, objections.length);
+
+    const conversationOutcome = negotiation.salesOutcome === 'Won'
+      ? 'Sale Confirmed'
+      : negotiation.salesOutcome === 'Lost'
+      ? 'Not Converted'
+      : negotiation.salesOutcome === 'Pending'
+      ? 'Follow-up Required'
+      : 'Unclear';
+
+    const customerBuyingIntent = negotiation.salesOutcome === 'Won'
+      ? 'High'
+      : (negotiation.salesOutcome === 'Lost' ? 'Low' : this.classifyBuyingIntent(fullText, 0, objections.length));
+
     const nextRecommendedAction = this.generateNextAction(conversationOutcome, customerBuyingIntent, productsDiscussed);
     const keyMoments = this.extractKeyMoments(transcripts, conversationOutcome);
 
@@ -434,7 +765,8 @@ class DealAnalysisService {
       (objections.length > 0
         ? `Topics addressed included ${objections.join(', ')}. `
         : `No significant objections were encountered. `) +
-      `Outcome concluded as "${conversationOutcome}" with ${customerBuyingIntent} buying intent.`;
+      `Outcome concluded as "${conversationOutcome}" with ${customerBuyingIntent} buying intent.` +
+      (negotiation.dealStatus === 'accepted' && negotiation.finalAgreedPrice ? ` Agreed deal value: $${negotiation.finalAgreedPrice}.` : '');
 
     return {
       customerRequirements,
@@ -448,6 +780,7 @@ class DealAnalysisService {
       nextRecommendedAction,
       summary,
       keyMoments,
+      ...negotiation,
     };
   }
 
@@ -468,7 +801,7 @@ TRANSCRIPT:
 ${fullDialogue}
 
 METADATA:
-Store: ${metadata.storeName || metadata.storeCode || 'iPhone Store'}
+Store: ${metadata.storeName || metadata.storeCode || 'Star Store'}
 Duration: ${metadata.durationSeconds || 0} seconds
 Salesperson: ${metadata.salesRep || 'Sales Specialist'}
 
@@ -611,43 +944,50 @@ CRITICAL ACCURACY INSTRUCTIONS:
         analysisResult = await this.analyzeWithGemini(usableLines, metadata);
       }
 
-      // 2. Fall back to deterministic retail analysis engine
+      // 2. Perform authoritative retail negotiation analysis
+      const negotiation = this.analyzeDealNegotiation(usableLines);
+
+      // 3. Fall back to deterministic retail analysis engine if Gemini was not run
       if (!analysisResult) {
         analysisResult = this.analyzeDeterministic(usableLines, metadata);
       }
 
-      const outcome = ['Sale Confirmed', 'Follow-up Required', 'Not Converted', 'Unclear'].includes(analysisResult.conversationOutcome)
-        ? analysisResult.conversationOutcome
+      const salesOutcome = negotiation.salesOutcome || 'Inconclusive';
+      const outcome = salesOutcome === 'Won'
+        ? 'Sale Confirmed'
+        : salesOutcome === 'Lost'
+        ? 'Not Converted'
+        : salesOutcome === 'Pending'
+        ? 'Follow-up Required'
         : 'Unclear';
 
-      const salesOutcome =
-        outcome === 'Sale Confirmed'
-          ? 'Won'
-          : outcome === 'Not Converted'
-          ? 'Lost'
-          : outcome === 'Follow-up Required'
-          ? 'Pending'
-          : 'Inconclusive';
-
       const outcomeExplanation =
-        outcome === 'Sale Confirmed'
-          ? 'Customer confirmed purchase transaction with payment or explicit agreement to purchase.'
-          : outcome === 'Not Converted'
-          ? 'Customer walked away, rejected the offer, or cited prohibitive budget constraints without purchasing.'
-          : outcome === 'Follow-up Required'
-          ? 'Customer expressed purchase intent but requested time to consult or scheduled a follow-up consultation; transaction pending.'
+        salesOutcome === 'Won'
+          ? (negotiation.isPriceVerified
+              ? `Customer confirmed purchase at agreed price of $${negotiation.finalAgreedPrice}.`
+              : 'Customer confirmed purchase transaction, but final price was unverified in transcript.')
+          : salesOutcome === 'Lost'
+          ? (negotiation.missedOpportunityReason === 'price_disagreement'
+              ? 'Customer rejected purchase due to price disagreement or counteroffer impasse.'
+              : 'Customer walked away or rejected offer without purchasing.')
+          : salesOutcome === 'Pending'
+          ? 'Customer expressed purchase interest but requested time to consider or consult before committing.'
           : 'Dialogue ended without explicit transaction or closure statement.';
 
       // Format final subdocument
       const finalAnalysis = {
         customerRequirements: analysisResult.customerRequirements || 'Not mentioned',
-        productsDiscussed: Array.isArray(analysisResult.productsDiscussed) ? analysisResult.productsDiscussed : [],
-        budgetAndPrice: analysisResult.budgetAndPrice || 'Not mentioned',
+        productsDiscussed: negotiation.products.length > 0
+          ? negotiation.products.map((p) => p.name)
+          : (Array.isArray(analysisResult.productsDiscussed) ? analysisResult.productsDiscussed : []),
+        budgetAndPrice: negotiation.finalAgreedPrice
+          ? `$${negotiation.finalAgreedPrice}`
+          : (analysisResult.budgetAndPrice || 'Not mentioned'),
         customerQuestions: Array.isArray(analysisResult.customerQuestions) ? analysisResult.customerQuestions : [],
         customerObjections: Array.isArray(analysisResult.customerObjections) ? analysisResult.customerObjections : [],
-        customerBuyingIntent: ['High', 'Medium', 'Low', 'Unclear'].includes(analysisResult.customerBuyingIntent)
-          ? analysisResult.customerBuyingIntent
-          : 'Unclear',
+        customerBuyingIntent: salesOutcome === 'Won'
+          ? 'High'
+          : (salesOutcome === 'Lost' ? 'Low' : (analysisResult.customerBuyingIntent || 'Unclear')),
         salespersonResponse: analysisResult.salespersonResponse || 'Not mentioned',
         conversationOutcome: outcome,
         salesOutcome,
@@ -660,17 +1000,42 @@ CRITICAL ACCURACY INSTRUCTIONS:
         transcriptVersionHash: currentHash,
         lastAnalyzedAt: new Date(),
         isOutdated: false,
+        // Deal negotiation attributes
+        dealStatus: negotiation.dealStatus,
+        customerCommitted: negotiation.customerCommitted,
+        initialAskingPrice: negotiation.initialAskingPrice,
+        customerOffer: negotiation.customerOffer,
+        agentCounterOffer: negotiation.agentCounterOffer,
+        finalAgreedPrice: negotiation.finalAgreedPrice,
+        agreedDealValue: negotiation.agreedDealValue,
+        realizedRevenue: negotiation.realizedRevenue,
+        currency: negotiation.currency || 'USD',
+        isPriceVerified: negotiation.isPriceVerified,
+        isMissedOpportunity: negotiation.isMissedOpportunity,
+        missedOpportunityReason: negotiation.missedOpportunityReason,
+        products: negotiation.products || [],
+        evidenceExcerpts: negotiation.evidenceExcerpts || [],
+        reviewFlags: negotiation.reviewFlags || [],
       };
 
-      // Also sync legacy analytics fields for compatibility
+      // Synchronize verified revenue and sales flags
       session.dealAnalysis = finalAnalysis;
+      if (negotiation.dealStatus === 'accepted' && negotiation.isPriceVerified && typeof negotiation.agreedDealValue === 'number') {
+        session.verifiedRevenue = negotiation.agreedDealValue;
+        session.verifiedSale = true;
+      } else if (negotiation.dealStatus === 'lost' || negotiation.dealStatus === 'pending') {
+        session.verifiedRevenue = 0;
+        session.verifiedSale = false;
+      }
+
+      // Also sync legacy analytics fields for compatibility
       if (session.analytics) {
         session.analytics.dealOutcome =
-          finalAnalysis.conversationOutcome === 'Sale Confirmed'
+          salesOutcome === 'Won'
             ? 'won'
-            : finalAnalysis.conversationOutcome === 'Not Converted'
+            : salesOutcome === 'Lost'
             ? 'lost'
-            : finalAnalysis.conversationOutcome === 'Follow-up Required'
+            : salesOutcome === 'Pending'
             ? 'in_negotiation'
             : 'inquiry_only';
         session.analytics.summary = finalAnalysis.summary;
@@ -678,7 +1043,7 @@ CRITICAL ACCURACY INSTRUCTIONS:
       }
 
       await session.save();
-      console.log(`✅ [Deal Analysis] Analysis generated & persisted for session: ${sessionId} (${finalAnalysis.conversationOutcome})`);
+      console.log(`✅ [Deal Analysis] Analysis generated & persisted for session: ${sessionId} (${finalAnalysis.conversationOutcome}, agreedValue: $${finalAnalysis.agreedDealValue})`);
 
       return finalAnalysis;
     } catch (err) {

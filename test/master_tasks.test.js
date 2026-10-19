@@ -255,7 +255,7 @@ describe('Storelistener Master Task Verification Suite', async () => {
         {
           sessionId: 's-001',
           storeCode: 'STORE-01',
-          storeName: 'iPhone Store 01',
+          storeName: 'Star Store 01',
           salesRep: 'Alex Rep',
           status: 'completed',
           durationSeconds: 180,
@@ -358,7 +358,7 @@ describe('Storelistener Master Task Verification Suite', async () => {
         endedAt: new Date('2026-10-14T14:35:00Z'),
         durationSeconds: 300,
         storeCode: 'STORE-01',
-        storeName: 'iPhone Store 01 (5th Ave)',
+        storeName: 'Star Store 01 (5th Ave)',
         salesRep: 'Michael Specialist',
         transcripts: [
           { speaker: 'Customer', text: 'I am interested in upgrading to the iPhone 15 Pro.', englishText: 'I am interested in upgrading to the iPhone 15 Pro.', timestamp: new Date() },
@@ -498,7 +498,7 @@ describe('Storelistener Master Task Verification Suite', async () => {
             endTimeFormatted: '02:35 PM',
             durationFormatted: '5m 00s',
             storeCode: 'STORE-01',
-            storeName: 'iPhone Store 01 (5th Ave)',
+            storeName: 'Star Store 01 (5th Ave)',
             salesperson: 'Alex Specialist',
             salesOutcome: 'Won',
             outcomeEvidence: 'Customer approved $1,199 purchase with trade-in discount.',

@@ -53,9 +53,12 @@ const DailyReportSchema = new mongoose.Schema({
     pendingAnalysisCount: { type: Number, default: 0 },
     failedAnalysisCount: { type: Number, default: 0 },
     wonCount: { type: Number, default: 0 },
+    acceptedDealsCount: { type: Number, default: 0 },
     lostCount: { type: Number, default: 0 },
     pendingCount: { type: Number, default: 0 },
     inconclusiveCount: { type: Number, default: 0 },
+    totalAgreedSalesValue: { type: Number, default: 0 },
+    totalAgreedSalesDisplay: { type: String, default: '$0' },
     verifiedSalesCount: { type: Number, default: 0 },
     verifiedRevenue: { type: Number, default: null }, // null = not verified / unavailable
     verifiedRevenueDisplay: { type: String, default: '$0' },

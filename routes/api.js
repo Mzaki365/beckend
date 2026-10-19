@@ -955,9 +955,9 @@ router.get('/analytics/deal-reports', async (req, res) => {
 
     const intentCounts = { High: 0, Medium: 0, Low: 0, Unclear: 0 };
     const storeMap = {
-      'STORE-01': { code: 'STORE-01', name: 'iPhone Store 01 (5th Ave)', total: 0, confirmed: 0, followUp: 0, notConverted: 0, unclear: 0 },
-      'STORE-02': { code: 'STORE-02', name: 'iPhone Store 02 (Beverly Hills)', total: 0, confirmed: 0, followUp: 0, notConverted: 0, unclear: 0 },
-      'STORE-03': { code: 'STORE-03', name: 'iPhone Store 03 (Brickell)', total: 0, confirmed: 0, followUp: 0, notConverted: 0, unclear: 0 }
+      'STORE-01': { code: 'STORE-01', name: 'Star Store 01 (5th Ave)', total: 0, confirmed: 0, followUp: 0, notConverted: 0, unclear: 0 },
+      'STORE-02': { code: 'STORE-02', name: 'Star Store 02 (Beverly Hills)', total: 0, confirmed: 0, followUp: 0, notConverted: 0, unclear: 0 },
+      'STORE-03': { code: 'STORE-03', name: 'Star Store 03 (Brickell)', total: 0, confirmed: 0, followUp: 0, notConverted: 0, unclear: 0 }
     };
 
     const dailyTrends = {};
