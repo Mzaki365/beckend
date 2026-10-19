@@ -54,8 +54,10 @@ function isOriginAllowed(origin) {
   if (clean.startsWith('file:')) return true;
   if (allowedOrigins.includes(clean) || allowedOrigins.includes(origin)) return true;
   if (clean.startsWith('http://localhost:') || clean.startsWith('http://127.0.0.1:')) return true;
-  // Allow canonical and preview deployments for storelistener-frontend on Vercel
-  if (/^https:\/\/storelistener-frontend.*\.vercel\.app$/.test(clean)) return true;
+  // Allow all Vercel deployments (production, preview, and personal project domains)
+  if (/^https:\/\/.*\.vercel\.app$/.test(clean)) return true;
+  // Allow Render domains
+  if (/^https:\/\/.*\.onrender\.com$/.test(clean)) return true;
   return false;
 }
 
@@ -67,7 +69,7 @@ const io = new Server(server, {
       if (isOriginAllowed(origin)) {
         return callback(null, true);
       }
-      return callback(new Error(`Not allowed by CORS: ${origin}`));
+      return callback(null, false);
     },
     credentials: true,
     methods: ['GET', 'POST']
@@ -81,7 +83,7 @@ app.use(cors({
     if (isOriginAllowed(origin)) {
       return callback(null, true);
     }
-    return callback(new Error(`Not allowed by CORS: ${origin}`));
+    return callback(null, false);
   },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
