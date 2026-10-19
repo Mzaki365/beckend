@@ -121,7 +121,7 @@ async function initDatabase() {
   if (mongoose.connection.readyState === 1) return mongoose.connection;
   if (dbPromise) return dbPromise;
 
-  const MONGODB_URI = process.env.MONGODB_URI || 'mongodb+srv://muhammadzakijutt036_db_user:QTRc6gDXvWa2cqN1@cluster0.iykomfy.mongodb.net/storelistener?retryWrites=true&w=majority';
+  const MONGODB_URI = process.env.MONGODB_URI || 'mongodb+srv://zakifananical_db_user:luboFsrYDPEGW60y@cluster0.ad5hkdk.mongodb.net/storelistener?retryWrites=true&w=majority';
 
   dbPromise = mongoose.connect(MONGODB_URI, {
     serverSelectionTimeoutMS: 5000,
